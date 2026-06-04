@@ -1,0 +1,965 @@
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Response
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from typing import Any, Dict, List, Optional
+import uuid
+import secrets
+import re
+from datetime import date, datetime, timedelta, timezone
+
+import requests
+
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# Create the main app without a prefix
+app = FastAPI()
+
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
+
+
+# Define Models
+class StatusCheck(BaseModel):
+    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+    
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_name: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class StatusCheckCreate(BaseModel):
+    client_name: str
+
+
+class MagicLinkRequest(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+    origin: str
+
+
+class MagicVerifyRequest(BaseModel):
+    token: str
+
+
+class OAuthSessionRequest(BaseModel):
+    session_id: str
+
+
+class ChildCreate(BaseModel):
+    first_name: str
+    age: int
+    grade: str
+    school_id: Optional[str] = None
+    interests: List[str] = []
+    allergies: str = ""
+    notes: str = ""
+    photo_url: Optional[str] = None
+
+
+class ChildUpdate(BaseModel):
+    first_name: Optional[str] = None
+    age: Optional[int] = None
+    grade: Optional[str] = None
+    school_id: Optional[str] = None
+    interests: Optional[List[str]] = None
+    allergies: Optional[str] = None
+    notes: Optional[str] = None
+    photo_url: Optional[str] = None
+
+
+class AvailabilityBlock(BaseModel):
+    start: str
+    end: str
+
+
+class AvailabilityCreate(BaseModel):
+    date: str
+    blocks: List[AvailabilityBlock]
+    recurrence: str = "once"
+
+
+class CommunityCheckRequest(BaseModel):
+    name: str
+    city: Optional[str] = None
+    type: str = "school"
+
+
+class CommunityCreate(BaseModel):
+    name: str
+    type: str = "school"
+    city: str = ""
+    connection: Optional[str] = None
+    scope: Optional[str] = None
+    detail: Optional[str] = None
+    master_community_id: Optional[str] = None
+
+
+class JoinCommunityRequest(BaseModel):
+    community_id: str
+    sponsor_name: Optional[str] = None
+    teacher_name: Optional[str] = None
+    child_grade: Optional[str] = None
+
+
+class PlaydateCreate(BaseModel):
+    type: str = "1:1"
+    invitee_parent_ids: List[str]
+    child_ids: List[str] = []
+    date: str
+    start_time: str
+    end_time: str
+    location: str
+    activity: str
+    notes: str = ""
+    min_confirmations: int = 1
+    title: Optional[str] = None
+
+
+class PlaydateResponseAction(BaseModel):
+    action: str
+    counter_date: Optional[str] = None
+    counter_start_time: Optional[str] = None
+    counter_end_time: Optional[str] = None
+
+
+class RescheduleRequest(BaseModel):
+    date: str
+    start_time: str
+    end_time: str
+
+
+class CancelRequest(BaseModel):
+    reason: str
+
+
+class ReactionRequest(BaseModel):
+    reaction: str
+
+
+class MemoryNoteRequest(BaseModel):
+    note_text: str
+    photo_url: Optional[str] = None
+
+
+class ChatMessageCreate(BaseModel):
+    content: str
+
+
+class ContactShareRequest(BaseModel):
+    method: str
+
+
+INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
+GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def clean_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def parse_expiry(value: Any) -> datetime:
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+    else:
+        parsed = value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def minutes(value: str) -> int:
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def time_label(value: str) -> str:
+    h, m = [int(part) for part in value.split(":")]
+    suffix = "AM" if h < 12 else "PM"
+    hour = h % 12 or 12
+    return f"{hour}:{m:02d} {suffix}"
+
+
+def date_label(value: str) -> str:
+    dt = datetime.fromisoformat(value).date()
+    return dt.strftime("%A, %B %-d") if os.name != "nt" else dt.strftime("%A, %B %#d")
+
+
+def tier_for_credits(credits: int) -> Dict[str, Any]:
+    if credits <= 10:
+        return {"name": "Curious Pup", "badge": "🐶", "next": 11, "credits": credits}
+    if credits <= 30:
+        return {"name": "Playful Otter", "badge": "🦦", "next": 31, "credits": credits}
+    if credits <= 75:
+        return {"name": "Social Penguin", "badge": "🐧", "next": 76, "credits": credits}
+    if credits <= 150:
+        return {"name": "Proud Elephant", "badge": "🐘", "next": 151, "credits": credits}
+    return {"name": "Mighty Lion", "badge": "🦁", "next": None, "credits": credits}
+
+
+def similarity(a: str, b: str) -> float:
+    a_tokens = set(re.sub(r"[^a-z0-9 ]", "", a.lower()).split())
+    b_tokens = set(re.sub(r"[^a-z0-9 ]", "", b.lower()).split())
+    if not a_tokens or not b_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
+
+
+async def send_resend_email(to_email: str, subject: str, html: str) -> Dict[str, Any]:
+    api_key = os.environ.get("RESEND_API_KEY")
+    if not api_key:
+        logger.warning("RESEND_API_KEY missing; email not sent")
+        return {"sent": False, "reason": "missing_key"}
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": "PlayPals <onboarding@resend.dev>",
+                "to": [to_email],
+                "subject": subject,
+                "html": html,
+            },
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            logger.warning("Resend failed: %s", response.text[:300])
+            reason = response.text[:300]
+            if "You can only send testing emails" in response.text:
+                reason = "Resend is in testing mode and can only send to the Resend account owner's email until a sender domain is verified."
+            return {"sent": False, "reason": reason}
+        return {"sent": True, "provider_id": response.json().get("id")}
+    except Exception as exc:  # pragma: no cover - network resilience
+        logger.warning("Resend exception: %s", exc)
+        return {"sent": False, "reason": str(exc)}
+
+
+async def upsert_user(email: str, name: Optional[str] = None, picture: Optional[str] = None) -> Dict[str, Any]:
+    normalized = clean_email(email)
+    existing = await db.users.find_one({"email": normalized}, {"_id": 0})
+    if existing:
+        updates = {"updated_at": now_iso()}
+        if name and not existing.get("name"):
+            updates["name"] = name
+        if picture:
+            updates["picture"] = picture
+        await db.users.update_one({"user_id": existing["user_id"]}, {"$set": updates})
+        existing.update(updates)
+        return existing
+
+    user = {
+        "user_id": new_id("user"),
+        "email": normalized,
+        "name": name or normalized.split("@")[0].replace(".", " ").title(),
+        "picture": picture or "",
+        "neighborhood": "",
+        "contact_preference": "email",
+        "notification_preferences": {"email": True, "push": True, "sms": False},
+        "phone": "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.users.insert_one(user.copy())
+    await add_credit(user["user_id"], 0, "account_created", user["user_id"])
+    return user
+
+
+async def add_credit(parent_id: str, amount: int, action_type: str, reference_id: str) -> None:
+    await db.credits.insert_one(
+        {
+            "credit_id": new_id("credit"),
+            "parent_id": parent_id,
+            "amount": amount,
+            "action_type": action_type,
+            "reference_id": reference_id,
+            "created_at": now_iso(),
+        }
+    )
+
+
+async def credit_total(parent_id: str) -> int:
+    rows = await db.credits.find({"parent_id": parent_id}, {"_id": 0, "amount": 1}).to_list(1000)
+    return int(sum(row.get("amount", 0) for row in rows))
+
+
+async def create_session(user_id: str, response: Response, session_token: Optional[str] = None) -> str:
+    token = session_token or f"sess_{secrets.token_urlsafe(36)}"
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    await db.user_sessions.insert_one(
+        {
+            "session_id": new_id("session"),
+            "user_id": user_id,
+            "session_token": token,
+            "expires_at": expires.isoformat(),
+            "created_at": now_iso(),
+        }
+    )
+    response.set_cookie(
+        "session_token",
+        token,
+        max_age=30 * 24 * 60 * 60,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+    )
+    return token
+
+
+async def current_user(request: Request) -> Dict[str, Any]:
+    token = request.cookies.get("session_token")
+    auth_header = request.headers.get("Authorization", "")
+    if not token and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    session_doc = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session_doc:
+        raise HTTPException(status_code=401, detail="Session not found")
+    if parse_expiry(session_doc["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    user_doc = await db.users.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user_doc
+
+
+async def notify_parent(parent_id: str, title: str, body: str, kind: str, reference_id: str = "") -> None:
+    notification = {
+        "notification_id": new_id("note"),
+        "parent_id": parent_id,
+        "title": title,
+        "body": body,
+        "kind": kind,
+        "reference_id": reference_id,
+        "read_at": None,
+        "created_at": now_iso(),
+    }
+    await db.notifications.insert_one(notification)
+    parent = await db.users.find_one({"user_id": parent_id}, {"_id": 0})
+    if parent and parent.get("notification_preferences", {}).get("email", True):
+        await send_resend_email(
+            parent["email"],
+            title,
+            f"<div style='font-family:Arial,sans-serif;color:#2D2A27'><h2>{title}</h2><p>{body}</p><p style='color:#8C6E6E'>Playdates, sorted.</p></div>",
+        )
+
+
+async def ensure_global_seed() -> None:
+    communities = [
+        {"community_id": "comm_mulgrave", "name": "Mulgrave School", "type": "school", "city": "West Vancouver", "master_community_id": None},
+        {"community_id": "comm_mulgrave_g1", "name": "Mulgrave Grade 1", "type": "school", "city": "West Vancouver", "master_community_id": "comm_mulgrave"},
+        {"community_id": "comm_kits", "name": "Kitsilano North Families", "type": "neighborhood", "city": "Vancouver", "master_community_id": None},
+    ]
+    for community in communities:
+        await db.communities.update_one(
+            {"community_id": community["community_id"]},
+            {"$setOnInsert": {**community, "created_by": "playpals", "status": "active", "created_at": now_iso()}},
+            upsert=True,
+        )
+
+    sample_families = [
+        ("sample_sarah", "Sarah Chen", "sarah.sample@playpals.local", "Riaan", 6, "Grade 1", ["Soccer", "Lego"]),
+        ("sample_michelle", "Michelle Patel", "michelle.sample@playpals.local", "Emma", 8, "Grade 3", ["Art", "Animals"]),
+        ("sample_david", "David Morgan", "david.sample@playpals.local", "Jake", 5, "Kindergarten", ["Nature", "Science"]),
+        ("sample_priya", "Priya Shah", "priya.sample@playpals.local", "Anika", 7, "Grade 2", ["Dance", "Reading"]),
+    ]
+    today = date.today()
+    upcoming = [(today + timedelta(days=i)).isoformat() for i in range(1, 15)]
+    for idx, (user_id, name, email, child_name, age, grade, interests) in enumerate(sample_families):
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$setOnInsert": {"user_id": user_id, "name": name, "email": email, "picture": "", "neighborhood": "West Vancouver", "contact_preference": "email", "notification_preferences": {"email": False, "push": True, "sms": False}, "phone": "", "created_at": now_iso(), "updated_at": now_iso()}},
+            upsert=True,
+        )
+        await db.children.update_one(
+            {"child_id": f"child_{user_id}"},
+            {"$setOnInsert": {"child_id": f"child_{user_id}", "parent_id": user_id, "first_name": child_name, "age": age, "grade": grade, "school_id": "comm_mulgrave", "interests": interests, "allergies": "", "notes": "", "photo_url": "", "is_alumni": False, "created_at": now_iso()}},
+            upsert=True,
+        )
+        for community_id in ["comm_mulgrave", "comm_mulgrave_g1"]:
+            await db.community_members.update_one(
+                {"community_id": community_id, "parent_id": user_id},
+                {"$setOnInsert": {"membership_id": new_id("member"), "community_id": community_id, "parent_id": user_id, "status": "active", "sponsor_id": "playpals", "joined_at": now_iso(), "provisional_expires_at": None}},
+                upsert=True,
+            )
+        slot_date = upcoming[(idx * 2 + 2) % len(upcoming)]
+        await db.availability_slots.update_one(
+            {"slot_id": f"slot_{user_id}_1"},
+            {"$set": {"slot_id": f"slot_{user_id}_1", "parent_id": user_id, "date": slot_date, "blocks": [{"start": "15:00", "end": "17:30"}], "is_recurring": False, "recurrence_rule": "once", "source_date": slot_date, "is_paused": False, "created_at": now_iso()}},
+            upsert=True,
+        )
+
+# Add your routes to the router instead of directly to app
+@api_router.get("/")
+async def root():
+    return {"message": "PlayPals API ready", "version": "1.0"}
+
+
+@api_router.post("/auth/magic-link")
+async def request_magic_link(payload: MagicLinkRequest):
+    email = clean_email(payload.email)
+    token = f"magic_{secrets.token_urlsafe(32)}"
+    await db.magic_links.insert_one(
+        {
+            "token": token,
+            "email": email,
+            "name": payload.name,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(),
+            "used_at": None,
+            "created_at": now_iso(),
+        }
+    )
+    link = f"{payload.origin}/auth/magic#token={token}"
+    result = await send_resend_email(
+        email,
+        "Your PlayPals magic link",
+        f"""
+        <div style='font-family:Arial,sans-serif;background:#F5F0E8;padding:24px;color:#2D2A27'>
+          <h1 style='margin:0 0 12px'>Less organizing. More playing.</h1>
+          <p>Tap below to sign in to PlayPals. This link expires in 20 minutes.</p>
+          <a href='{link}' style='display:inline-block;background:#C17A5A;color:white;padding:14px 18px;border-radius:16px;text-decoration:none;font-weight:700'>Open PlayPals →</a>
+          <p style='color:#8C6E6E;font-size:13px;margin-top:18px'>If you did not request this, you can ignore this email.</p>
+        </div>
+        """,
+    )
+    return {"sent": result["sent"], "message": "Magic link requested", "email_status": result}
+
+
+@api_router.post("/auth/magic/verify")
+async def verify_magic_link(payload: MagicVerifyRequest, response: Response):
+    link = await db.magic_links.find_one({"token": payload.token}, {"_id": 0})
+    if not link or link.get("used_at"):
+        raise HTTPException(status_code=401, detail="Magic link is invalid or already used")
+    if parse_expiry(link["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Magic link expired")
+    user = await upsert_user(link["email"], link.get("name"))
+    await db.magic_links.update_one({"token": payload.token}, {"$set": {"used_at": now_iso()}})
+    await create_session(user["user_id"], response)
+    return {"user": await enrich_user(user)}
+
+
+@api_router.post("/auth/oauth/session")
+async def oauth_session(payload: OAuthSessionRequest, response: Response):
+    emergent_response = requests.get(
+        "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+        headers={"X-Session-ID": payload.session_id},
+        timeout=12,
+    )
+    if emergent_response.status_code >= 400:
+        raise HTTPException(status_code=401, detail="Google session could not be verified")
+    data = emergent_response.json()
+    user = await upsert_user(data["email"], data.get("name"), data.get("picture"))
+    await create_session(user["user_id"], response, data.get("session_token"))
+    return {"user": await enrich_user(user)}
+
+
+async def enrich_user(user: Dict[str, Any]) -> Dict[str, Any]:
+    total = await credit_total(user["user_id"])
+    enriched = {**user, "credits": total, "tier": tier_for_credits(total)}
+    return enriched
+
+
+@api_router.get("/auth/me")
+async def auth_me(user: Dict[str, Any] = Depends(current_user)):
+    return {"user": await enrich_user(user)}
+
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    token = request.cookies.get("session_token")
+    if token:
+        await db.user_sessions.delete_many({"session_token": token})
+    response.delete_cookie("session_token", path="/", secure=True, samesite="none")
+    return {"ok": True}
+
+
+@api_router.get("/meta")
+async def meta():
+    return {"interests": INTERESTS, "grades": GRADES}
+
+
+@api_router.get("/dashboard")
+async def dashboard(user: Dict[str, Any] = Depends(current_user)):
+    parent_id = user["user_id"]
+    children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(50)
+    memberships = await db.community_members.find({"parent_id": parent_id}, {"_id": 0}).to_list(100)
+    community_ids = [member["community_id"] for member in memberships]
+    communities = await db.communities.find({"community_id": {"$in": community_ids}}, {"_id": 0}).to_list(100) if community_ids else []
+    playdates = await get_playdates_for_parent(parent_id)
+    notifications = await db.notifications.find({"parent_id": parent_id}, {"_id": 0}).sort("created_at", -1).to_list(20)
+    availability = await db.availability_slots.find({"parent_id": parent_id}, {"_id": 0}).to_list(500)
+    matches = await find_matches(parent_id)
+    profile = await enrich_user(user)
+    return {
+        "parent": profile,
+        "children": children,
+        "memberships": memberships,
+        "communities": communities,
+        "playdates": playdates,
+        "notifications": notifications,
+        "availability": availability,
+        "matches": matches,
+        "onboarding": {
+            "has_child": len(children) > 0,
+            "has_availability": len(availability) > 0,
+            "has_community": len(memberships) > 0,
+            "complete": bool(children and availability and memberships),
+        },
+    }
+
+
+@api_router.post("/children")
+async def create_child(payload: ChildCreate, user: Dict[str, Any] = Depends(current_user)):
+    if payload.age < 1 or payload.age > 10:
+        raise HTTPException(status_code=400, detail="PlayPals supports children aged 1–10 in setup and focuses scheduling on ages 3–10")
+    child = {
+        "child_id": new_id("child"),
+        "parent_id": user["user_id"],
+        **payload.model_dump(),
+        "is_alumni": False,
+        "created_at": now_iso(),
+    }
+    await db.children.insert_one(child.copy())
+    await add_credit(user["user_id"], 1, "completed_child_profile", child["child_id"])
+    return child
+
+
+@api_router.get("/children")
+async def list_children(user: Dict[str, Any] = Depends(current_user)):
+    return await db.children.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(50)
+
+
+@api_router.put("/children/{child_id}")
+async def update_child(child_id: str, payload: ChildUpdate, user: Dict[str, Any] = Depends(current_user)):
+    child = await db.children.find_one({"child_id": child_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not child:
+        raise HTTPException(status_code=404, detail="Child profile not found")
+    updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if "age" in updates and (updates["age"] < 1 or updates["age"] > 10):
+        raise HTTPException(status_code=400, detail="PlayPals supports children aged 1–10 in setup and focuses scheduling on ages 3–10")
+    if updates:
+        updates["updated_at"] = now_iso()
+        await db.children.update_one({"child_id": child_id, "parent_id": user["user_id"]}, {"$set": updates})
+    updated = await db.children.find_one({"child_id": child_id, "parent_id": user["user_id"]}, {"_id": 0})
+    return updated
+
+
+def validate_blocks(blocks: List[AvailabilityBlock]) -> List[Dict[str, str]]:
+    normalized = sorted([{"start": block.start, "end": block.end} for block in blocks], key=lambda row: minutes(row["start"]))
+    for idx, block in enumerate(normalized):
+        if minutes(block["end"]) - minutes(block["start"]) < 15:
+            raise HTTPException(status_code=400, detail="Please select at least a 15-minute window")
+        if minutes(block["start"]) < 360 or minutes(block["end"]) > 1260:
+            raise HTTPException(status_code=400, detail="Availability must be between 6:00 AM and 9:00 PM")
+        if idx and minutes(block["start"]) < minutes(normalized[idx - 1]["end"]):
+            raise HTTPException(status_code=400, detail="Time blocks cannot overlap")
+    if len(normalized) > 4:
+        raise HTTPException(status_code=400, detail="Maximum 4 time blocks per day")
+    return normalized
+
+
+@api_router.post("/availability")
+async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = Depends(current_user)):
+    selected_date = datetime.fromisoformat(payload.date).date()
+    if selected_date < date.today():
+        raise HTTPException(status_code=400, detail="Past dates are view only")
+    blocks = validate_blocks(payload.blocks)
+    dates = [selected_date]
+    if payload.recurrence == "weekly":
+        dates = [selected_date + timedelta(days=7 * i) for i in range(53)]
+    saved = []
+    for slot_date in dates:
+        doc = {
+            "slot_id": new_id("slot"),
+            "parent_id": user["user_id"],
+            "date": slot_date.isoformat(),
+            "blocks": blocks,
+            "is_recurring": payload.recurrence == "weekly",
+            "recurrence_rule": f"weekly:{selected_date.weekday()}" if payload.recurrence == "weekly" else "once",
+            "source_date": selected_date.isoformat(),
+            "is_paused": False,
+            "created_at": now_iso(),
+        }
+        await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat()})
+        await db.availability_slots.insert_one(doc.copy())
+        saved.append(doc)
+    return {"saved": saved[:60], "count": len(saved)}
+
+
+@api_router.get("/availability")
+async def list_availability(user: Dict[str, Any] = Depends(current_user)):
+    return await db.availability_slots.find({"parent_id": user["user_id"]}, {"_id": 0}).sort("date", 1).to_list(700)
+
+
+@api_router.delete("/availability/{date_value}")
+async def remove_availability(date_value: str, user: Dict[str, Any] = Depends(current_user)):
+    await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value})
+    return {"ok": True}
+
+
+@api_router.get("/communities")
+async def list_communities(user: Dict[str, Any] = Depends(current_user)):
+    communities = await db.communities.find({"status": "active"}, {"_id": 0}).sort("name", 1).to_list(200)
+    memberships = await db.community_members.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(200)
+    member_map = {member["community_id"]: member for member in memberships}
+    for community in communities:
+        community["member_count"] = await db.community_members.count_documents({"community_id": community["community_id"], "status": {"$in": ["active", "provisional"]}})
+        community["membership"] = member_map.get(community["community_id"])
+    return communities
+
+
+@api_router.post("/communities/check-duplicate")
+async def check_community_duplicate(payload: CommunityCheckRequest, user: Dict[str, Any] = Depends(current_user)):
+    existing = await db.communities.find({"status": "active"}, {"_id": 0}).to_list(500)
+    scored = []
+    target = f"{payload.name} {payload.city or ''} {payload.type}"
+    for community in existing:
+        score = similarity(target, f"{community.get('name', '')} {community.get('city', '')} {community.get('type', '')}")
+        if score >= 0.35:
+            scored.append({"community": community, "score": round(score, 2), "status": "duplicate" if score >= 0.78 else "similar"})
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    result = "unique"
+    if scored and scored[0]["status"] == "duplicate":
+        result = "duplicate"
+    elif scored:
+        result = "similar"
+    return {"result": result, "matches": scored[:5]}
+
+
+@api_router.post("/communities")
+async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depends(current_user)):
+    duplicate = await check_community_duplicate(CommunityCheckRequest(name=payload.name, city=payload.city, type=payload.type), user)
+    if duplicate["result"] == "duplicate":
+        return {"created": False, "duplicate": duplicate["matches"][0]["community"]}
+    community = {
+        "community_id": new_id("comm"),
+        **payload.model_dump(),
+        "created_by": user["user_id"],
+        "status": "active",
+        "created_at": now_iso(),
+    }
+    await db.communities.insert_one(community.copy())
+    await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "joined_at": now_iso(), "provisional_expires_at": None})
+    await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
+    return {"created": True, "community": community, "duplicate_check": duplicate}
+
+
+@api_router.post("/communities/join")
+async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = Depends(current_user)):
+    community = await db.communities.find_one({"community_id": payload.community_id}, {"_id": 0})
+    if not community:
+        raise HTTPException(status_code=404, detail="Community not found")
+    existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if existing:
+        return {"membership": existing, "community": community}
+    status = "provisional"
+    sponsor_id = None
+    if payload.sponsor_name:
+        sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
+        if sponsor:
+            sponsor_id = sponsor["user_id"]
+            status = "active"
+            await add_credit(sponsor_id, 2, "sponsored_member", user["user_id"])
+            await add_credit(user["user_id"], 1, "joined_with_sponsor", payload.community_id)
+    elif payload.teacher_name and payload.child_grade:
+        status = "active"
+        await add_credit(user["user_id"], 1, "school_verified_join", payload.community_id)
+    membership = {"membership_id": new_id("member"), "community_id": payload.community_id, "parent_id": user["user_id"], "status": status, "sponsor_id": sponsor_id, "joined_at": now_iso(), "provisional_expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat() if status == "provisional" else None}
+    await db.community_members.insert_one(membership.copy())
+    await notify_parent(user["user_id"], "Community joined", f"You're now {status} in {community['name']}.", "community", payload.community_id)
+    return {"membership": membership, "community": community}
+
+
+async def common_community_parent_ids(parent_id: str) -> List[str]:
+    memberships = await db.community_members.find({"parent_id": parent_id, "status": {"$in": ["active", "provisional"]}}, {"_id": 0}).to_list(100)
+    community_ids = [m["community_id"] for m in memberships]
+    if not community_ids:
+        return []
+    peer_members = await db.community_members.find({"community_id": {"$in": community_ids}, "status": {"$in": ["active", "provisional"]}}, {"_id": 0}).to_list(500)
+    return list({m["parent_id"] for m in peer_members if m["parent_id"] != parent_id})
+
+
+async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
+    peers = await common_community_parent_ids(parent_id)
+    start = date.today().isoformat()
+    end = (date.today() + timedelta(days=21)).isoformat()
+    feed = []
+    for peer_id in peers:
+        parent = await db.users.find_one({"user_id": peer_id}, {"_id": 0})
+        children = await db.children.find({"parent_id": peer_id}, {"_id": 0}).to_list(10)
+        slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
+        if parent and slots:
+            feed.append({"parent": parent, "children": children, "slots": slots})
+    return feed
+
+
+@api_router.get("/community-feed")
+async def community_feed(user: Dict[str, Any] = Depends(current_user)):
+    return {"families": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"])}
+
+
+async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
+    own_slots = await db.availability_slots.find({"parent_id": parent_id, "date": {"$gte": date.today().isoformat()}, "is_paused": False}, {"_id": 0}).to_list(500)
+    if not own_slots:
+        return []
+    peers = await common_community_parent_ids(parent_id)
+    matches = []
+    own_by_date = {}
+    for slot in own_slots:
+        own_by_date.setdefault(slot["date"], []).extend(slot.get("blocks", []))
+    for peer_id in peers:
+        peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
+        for slot in peer_slots:
+            for own_block in own_by_date.get(slot["date"], []):
+                for peer_block in slot.get("blocks", []):
+                    start = max(minutes(own_block["start"]), minutes(peer_block["start"]))
+                    end = min(minutes(own_block["end"]), minutes(peer_block["end"]))
+                    if end - start >= 90:
+                        parent = await db.users.find_one({"user_id": peer_id}, {"_id": 0})
+                        peer_children = await db.children.find({"parent_id": peer_id}, {"_id": 0}).to_list(10)
+                        own_children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(10)
+                        matches.append({
+                            "match_id": f"match_{peer_id}_{slot['date']}_{start}",
+                            "parent": parent,
+                            "children": peer_children,
+                            "own_children": own_children,
+                            "date": slot["date"],
+                            "start_time": f"{start // 60:02d}:{start % 60:02d}",
+                            "end_time": f"{end // 60:02d}:{end % 60:02d}",
+                            "duration_minutes": end - start,
+                        })
+    matches.sort(key=lambda row: row["duration_minutes"], reverse=True)
+    return matches[:8]
+
+
+async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
+    participant_rows = await db.playdate_participants.find({"parent_id": parent_id}, {"_id": 0}).to_list(500)
+    ids = [row["playdate_id"] for row in participant_rows]
+    organized = await db.playdates.find({"organizer_id": parent_id}, {"_id": 0}).to_list(500)
+    all_ids = list({*ids, *[row["playdate_id"] for row in organized]})
+    if not all_ids:
+        return []
+    playdates = await db.playdates.find({"playdate_id": {"$in": all_ids}}, {"_id": 0}).sort("date", 1).to_list(500)
+    for playdate in playdates:
+        participants = await db.playdate_participants.find({"playdate_id": playdate["playdate_id"]}, {"_id": 0}).to_list(20)
+        for participant in participants:
+            participant["parent"] = await db.users.find_one({"user_id": participant["parent_id"]}, {"_id": 0})
+            participant["children"] = await db.children.find({"child_id": {"$in": participant.get("child_ids", [])}}, {"_id": 0}).to_list(10)
+        playdate["participants"] = participants
+    return playdates
+
+
+@api_router.get("/playdates")
+async def list_playdates(user: Dict[str, Any] = Depends(current_user)):
+    return await get_playdates_for_parent(user["user_id"])
+
+
+@api_router.post("/playdates")
+async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depends(current_user)):
+    playdate_id = new_id("playdate")
+    title = payload.title or ("Group Playdate" if payload.type == "group" else "1:1 Playdate")
+    playdate = {
+        "playdate_id": playdate_id,
+        "type": payload.type,
+        "organizer_id": user["user_id"],
+        "title": title,
+        "date": payload.date,
+        "start_time": payload.start_time,
+        "end_time": payload.end_time,
+        "location": payload.location,
+        "activity": payload.activity,
+        "notes": payload.notes,
+        "status": "proposed",
+        "min_confirmations": payload.min_confirmations,
+        "cancellation_reason": None,
+        "reschedule_rounds": 0,
+        "created_at": now_iso(),
+    }
+    await db.playdates.insert_one(playdate.copy())
+    await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
+    for invitee in payload.invitee_parent_ids[:6]:
+        await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": invitee, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
+        await notify_parent(invitee, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
+    return {"playdate": playdate}
+
+
+@api_router.post("/playdates/{playdate_id}/respond")
+async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, user: Dict[str, Any] = Depends(current_user)):
+    playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
+    if not playdate:
+        raise HTTPException(status_code=404, detail="Playdate not found")
+    participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not participant:
+        raise HTTPException(status_code=403, detail="Not a participant")
+    if payload.action == "accept":
+        await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
+        accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
+        if accepted >= max(2, playdate.get("min_confirmations", 1)):
+            await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
+            await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
+    elif payload.action == "decline":
+        await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
+        await notify_parent(playdate["organizer_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
+    elif payload.action == "counter":
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "countered", "counter": {"date": payload.counter_date, "start_time": payload.counter_start_time, "end_time": payload.counter_end_time, "from_parent_id": user["user_id"], "created_at": now_iso()}}})
+        await notify_parent(playdate["organizer_id"], "Counter-proposal received", f"{user['name']} suggested another time.", "playdate", playdate_id)
+    return {"playdate": await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})}
+
+
+@api_router.post("/playdates/{playdate_id}/reschedule")
+async def reschedule_playdate(playdate_id: str, payload: RescheduleRequest, user: Dict[str, Any] = Depends(current_user)):
+    playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
+    if not playdate:
+        raise HTTPException(status_code=404, detail="Playdate not found")
+    if playdate.get("reschedule_rounds", 0) >= 3:
+        raise HTTPException(status_code=400, detail="This one seems tricky — want to cancel and try a fresh date?")
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"date": payload.date, "start_time": payload.start_time, "end_time": payload.end_time, "status": "rescheduled"}, "$inc": {"reschedule_rounds": 1}})
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+    for participant in participants:
+        await notify_parent(participant["parent_id"], "Reschedule request", f"{user['name']} suggested a new time for {playdate['activity']}.", "playdate", playdate_id)
+    return {"ok": True}
+
+
+@api_router.post("/playdates/{playdate_id}/cancel")
+async def cancel_playdate(playdate_id: str, payload: CancelRequest, user: Dict[str, Any] = Depends(current_user)):
+    playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
+    if not playdate:
+        raise HTTPException(status_code=404, detail="Playdate not found")
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled", "cancellation_reason": payload.reason, "cancelled_by": user["user_id"], "cancelled_at": now_iso()}})
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+    for participant in participants:
+        await notify_parent(participant["parent_id"], "Playdate cancelled", f"{user['name']} cancelled: {payload.reason}.", "playdate", playdate_id)
+    return {"ok": True}
+
+
+@api_router.post("/playdates/{playdate_id}/complete")
+async def complete_playdate(playdate_id: str, user: Dict[str, Any] = Depends(current_user)):
+    playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
+    if not playdate:
+        raise HTTPException(status_code=404, detail="Playdate not found")
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "completed", "completed_at": now_iso()}})
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
+    for participant in participants:
+        amount = 2 if participant["parent_id"] == playdate["organizer_id"] else 1
+        await add_credit(participant["parent_id"], amount, "completed_playdate", playdate_id)
+        await notify_parent(participant["parent_id"], "Hope it was a blast! 🎉", "Your PlayPals credits have been added.", "credits", playdate_id)
+    return {"ok": True}
+
+
+@api_router.post("/playdates/{playdate_id}/reaction")
+async def add_reaction(playdate_id: str, payload: ReactionRequest, user: Dict[str, Any] = Depends(current_user)):
+    await db.emoji_reactions.update_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"$set": {"reaction_id": new_id("react"), "playdate_id": playdate_id, "parent_id": user["user_id"], "reaction": payload.reaction, "created_at": now_iso()}}, upsert=True)
+    return {"ok": True}
+
+
+@api_router.post("/playdates/{playdate_id}/memory")
+async def add_memory(playdate_id: str, payload: MemoryNoteRequest, user: Dict[str, Any] = Depends(current_user)):
+    memory = {"memory_id": new_id("memory"), "playdate_id": playdate_id, "parent_id": user["user_id"], **payload.model_dump(), "created_at": now_iso()}
+    await db.memory_notes.insert_one(memory.copy())
+    return memory
+
+
+@api_router.get("/playdates/{playdate_id}/messages")
+async def list_messages(playdate_id: str, user: Dict[str, Any] = Depends(current_user)):
+    participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not participant:
+        raise HTTPException(status_code=403, detail="Not a participant")
+    return await db.messages.find({"playdate_id": playdate_id}, {"_id": 0}).sort("created_at", 1).to_list(500)
+
+
+@api_router.post("/playdates/{playdate_id}/messages")
+async def send_message(playdate_id: str, payload: ChatMessageCreate, user: Dict[str, Any] = Depends(current_user)):
+    playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
+    participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not playdate or not participant:
+        raise HTTPException(status_code=403, detail="Chat unavailable")
+    if playdate["status"] == "completed":
+        raise HTTPException(status_code=400, detail="This playdate has ended. Start a new one?")
+    if playdate["status"] not in ["confirmed", "rescheduled"]:
+        raise HTTPException(status_code=400, detail="Chat opens after a playdate is confirmed")
+    message = {"message_id": new_id("msg"), "playdate_id": playdate_id, "sender_id": user["user_id"], "sender_name": user["name"], "content": payload.content, "created_at": now_iso(), "read_at": None}
+    await db.messages.insert_one(message.copy())
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}, "rsvp_status": "accepted"}, {"_id": 0}).to_list(20)
+    for participant_row in participants:
+        await notify_parent(participant_row["parent_id"], "New playdate chat message", f"{user['name']}: {payload.content[:80]}", "chat", playdate_id)
+    return message
+
+
+@api_router.post("/playdates/{playdate_id}/share-contact")
+async def share_contact(playdate_id: str, payload: ContactShareRequest, user: Dict[str, Any] = Depends(current_user)):
+    value = user.get("phone") if payload.method == "phone" else user.get("email")
+    await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"$set": {"shared_contact": {"method": payload.method, "value": value, "shared_at": now_iso()}}})
+    return {"ok": True}
+
+@api_router.post("/status", response_model=StatusCheck)
+async def create_status_check(input: StatusCheckCreate):
+    status_dict = input.model_dump()
+    status_obj = StatusCheck(**status_dict)
+    
+    # Convert to dict and serialize datetime to ISO string for MongoDB
+    doc = status_obj.model_dump()
+    doc['timestamp'] = doc['timestamp'].isoformat()
+    
+    _ = await db.status_checks.insert_one(doc)
+    return status_obj
+
+@api_router.get("/status", response_model=List[StatusCheck])
+async def get_status_checks():
+    # Exclude MongoDB's _id field from the query results
+    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+    
+    # Convert ISO string timestamps back to datetime objects
+    for check in status_checks:
+        if isinstance(check['timestamp'], str):
+            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    
+    return status_checks
+
+# Include the router in the main app
+app.include_router(api_router)
+
+cors_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
+cors_kwargs = {"allow_credentials": True, "allow_methods": ["*"], "allow_headers": ["*"]}
+if "*" in cors_origins:
+    cors_kwargs["allow_origins"] = []
+    cors_kwargs["allow_origin_regex"] = ".*"
+else:
+    cors_kwargs["allow_origins"] = cors_origins
+app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def startup_seed():
+    await ensure_global_seed()
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
