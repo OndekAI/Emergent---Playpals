@@ -10,7 +10,6 @@ import {
 } from "react-router-dom";
 import {
   Baby,
-  Bell,
   CalendarDays,
   Check,
   ChevronLeft,
@@ -339,10 +338,7 @@ function HomePage({ user, dashboard, refresh }) {
         <section className="stack" data-testid="home-activity-section">
           <h2 className="section-title" data-testid="home-activity-title">Activity</h2>
           {(dashboard?.notifications || []).slice(0, 4).map((note) => (
-            <div className="mini-card" key={note.notification_id} data-testid={`activity-${note.notification_id}`}>
-              <div className="row" style={{ gap: 10 }}><Bell size={18} /><strong data-testid={`activity-title-${note.notification_id}`}>{note.title}</strong></div>
-              <p className="muted" data-testid={`activity-body-${note.notification_id}`}>{note.body}</p>
-            </div>
+            <ActivityCard note={note} key={note.notification_id} />
           ))}
           {!dashboard?.notifications?.length && <div className="empty-state card" data-testid="home-empty-activity">Helpful nudges will show here.</div>}
         </section>
@@ -874,6 +870,7 @@ function PlaydateCard({ playdate, user, refresh }) {
   const [showChat, setShowChat] = useState(false);
   const [showComplete, setShowComplete] = useState(false);
   const [showReschedule, setShowReschedule] = useState(false);
+  const [showCancel, setShowCancel] = useState(false);
   const isInvitee = playdate.participants?.some((p) => p.parent_id === user.user_id && p.rsvp_status === "invited");
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
   const respond = async (action) => {
@@ -882,9 +879,6 @@ function PlaydateCard({ playdate, user, refresh }) {
       toast.success(action === "accept" ? "Playdate confirmed" : "Response sent");
       await refresh();
     } catch (error) { toast.error(error.message); }
-  };
-  const cancel = async () => {
-    try { await api(`/playdates/${playdate.playdate_id}/cancel`, { method: "POST", body: JSON.stringify({ reason: "Child is sick 🤒" }) }); toast.success("Playdate cancelled"); await refresh(); } catch (error) { toast.error(error.message); }
   };
   return (
     <article className="card stack" data-testid={`playdate-card-${playdate.playdate_id}`}>
@@ -897,18 +891,20 @@ function PlaydateCard({ playdate, user, refresh }) {
       </div>
       <p className="muted" data-testid={`playdate-detail-${playdate.playdate_id}`}><CalendarDays size={15} /> {fmtDate(playdate.date, { weekday: "long", month: "short", day: "numeric" })} · {timeLabel(playdate.start_time)}–{timeLabel(playdate.end_time)}</p>
       <p className="muted" data-testid={`playdate-location-${playdate.playdate_id}`}><MapPin size={15} /> {playdate.location} · {playdate.activity}</p>
-      <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name || "Parent"}</span>)}</div>
+      <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name?.split(" ")[0] || "Parent"}</span>)}</div>
       <div className="proposal-actions">
         {isInvitee && <button className="button sage small" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>}
         {isInvitee && <button className="button secondary small" onClick={() => respond("decline")} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>}
         {["confirmed", "rescheduled", "completed"].includes(playdate.status) && <button className="button secondary" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Open Chat</button>}
         {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>}
-        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={cancel} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Sick day cancel</button>}
-        {playdate.status !== "completed" && <button className="button ghost small" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>}
+        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>}
+        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button ghost small" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>}
       </div>
+      {isInvitee && <button className="button amber-outline" onClick={() => setShowReschedule(true)} data-testid={`playdate-counter-${playdate.playdate_id}`}>↳ Counter-propose new time</button>}
       {showChat && <ChatModal playdate={playdate} onClose={() => setShowChat(false)} />}
       {showReschedule && <RescheduleModal playdate={playdate} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
+      {showCancel && <CancelModal playdate={playdate} refresh={refresh} onClose={() => setShowCancel(false)} />}
     </article>
   );
 }
@@ -989,6 +985,38 @@ function CompletionModal({ playdate, refresh, onClose }) {
   );
 }
 
+const CANCEL_REASONS = [
+  { label: "Schedule conflict", value: "Schedule conflict" },
+  { label: "Child is sick 🤒", value: "sick" },
+  { label: "Change of plans", value: "Change of plans" },
+  { label: "Other", value: "Other" },
+];
+
+function CancelModal({ playdate, refresh, onClose }) {
+  const [reason, setReason] = useState("Schedule conflict");
+  const cancel = async () => {
+    try {
+      await api(`/playdates/${playdate.playdate_id}/cancel`, { method: "POST", body: JSON.stringify({ reason }) });
+      toast.success("Playdate cancelled");
+      await refresh();
+      onClose();
+    } catch (error) { toast.error(error.message); }
+  };
+  return (
+    <div className="center-overlay" data-testid="cancel-modal-overlay">
+      <section className="modal-panel stack" data-testid="cancel-modal">
+        <div className="sheet-title-row"><h3 data-testid="cancel-title">Cancel playdate</h3><button className="icon-button" onClick={onClose} data-testid="cancel-close-button"><X size={20} /></button></div>
+        <div className="stack" data-testid="cancel-reason-options">
+          {CANCEL_REASONS.map(({ label, value }) => (
+            <button key={value} className={`radio-card ${reason === value ? "active" : ""}`} onClick={() => setReason(value)} data-testid={`cancel-reason-${value.toLowerCase().replace(/\s+/g, "-")}`}>{label}</button>
+          ))}
+        </div>
+        <button className="button primary" onClick={cancel} data-testid="cancel-submit-button">Confirm cancellation</button>
+      </section>
+    </div>
+  );
+}
+
 function GroupPlaydateModal({ dashboard, refresh, onClose }) {
   const [selected, setSelected] = useState([]);
   const [date, setDate] = useState(isoDate(new Date(Date.now() + 86400000 * 3)));
@@ -1044,10 +1072,10 @@ function ProfilePage({ user, dashboard, refresh }) {
       <div className="stack stagger">
         <section className="card stack" data-testid="profile-parent-card">
           <div className="family-head">
-            <div className="row" style={{ gap: 12 }}><div className="avatar-circle" style={{ width: 52, height: 52 }} data-testid="profile-avatar">{user?.name?.[0] || "P"}</div><div><h1 className="section-title" data-testid="profile-name">{user?.name}</h1><p className="muted" data-testid="profile-email">{user?.email}</p></div></div>
+            <div className="row" style={{ gap: 12 }}><div className="avatar-circle" style={{ width: 52, height: 52 }} data-testid="profile-avatar">{user?.name?.[0] || "P"}</div><div><h1 className="section-title" data-testid="profile-name">{user?.name?.split(" ")[0] || "P"}</h1><p className="muted" data-testid="profile-email">{user?.email}</p></div></div>
             <button className="button small secondary" onClick={() => setShowParentEdit(true)} data-testid="edit-parent-profile-button"><Pencil size={15} /> Edit</button>
           </div>
-          <span className="badge amber" data-testid="profile-tier-badge">{user?.tier?.badge} {user?.tier?.name} · {user?.credits || 0} credits</span>
+          <span className="badge amber" data-testid="profile-tier-badge">{user?.tier?.badge} {user?.tier?.name} · {user?.credits || 0} {user?.credits === 1 ? "credit" : "credits"}</span>
           <section className="stats-row" data-testid="profile-stats-row">
             {[["playdates_completed", "Playdates completed"], ["credits_earned", "Credits earned"], ["availability_slots", "Availability slots"]].map(([key, label]) => <div className="stat-tile" key={key} data-testid={`profile-stat-${key}`}><strong>{dashboard?.stats?.[key] || 0}</strong><span>{label}</span></div>)}
           </section>
@@ -1127,12 +1155,13 @@ function ChildModal({ child, onClose, refresh }) {
   });
   const toggleInterest = (interest) => setForm((prev) => ({ ...prev, interests: prev.interests.includes(interest) ? prev.interests.filter((i) => i !== interest) : [...prev.interests, interest] }));
   const save = async () => {
+    const payload = { ...form, first_name: form.first_name ? form.first_name.charAt(0).toUpperCase() + form.first_name.slice(1) : form.first_name };
     try {
       if (child?.child_id) {
-        await api(`/children/${child.child_id}`, { method: "PUT", body: JSON.stringify(form) });
+        await api(`/children/${child.child_id}`, { method: "PUT", body: JSON.stringify(payload) });
         toast.success("Child profile updated");
       } else {
-        await api("/children", { method: "POST", body: JSON.stringify(form) });
+        await api("/children", { method: "POST", body: JSON.stringify(payload) });
         toast.success("Child profile added");
       }
       await refresh();

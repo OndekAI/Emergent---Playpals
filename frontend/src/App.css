@@ -7,7 +7,7 @@
     --amber: #F5C07A;
     --charcoal: #2D2A27;
     --stone: #8C6E6E;
-    --shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow: 0 2px 8px rgba(45, 42, 39, 0.06);
 }
 
 .App {
@@ -37,7 +37,7 @@
     flex-direction: column;
     justify-content: space-between;
     gap: 18px;
-    background: #fbf1ee;
+    background: var(--oatmeal);
 }
 
 .login-top-section { min-height: 56vh; }
@@ -227,6 +227,11 @@
     flex: 1;
 }
 
+[data-testid="google-login-button"] {
+    background: var(--terracotta);
+    color: #fff;
+}
+
 .privacy-note {
     color: #b4a09d;
     font-size: 10px;
@@ -263,6 +268,7 @@
 .button.blue { background: var(--blue); color: white; }
 .button.sage { background: var(--sage); color: white; }
 .button.ghost { background: transparent; color: var(--stone); min-height: 44px; }
+.button.amber-outline { background: transparent; color: #8B5A18; border: 2px solid var(--amber); width: 100%; }
 .button.small { min-height: 42px; padding: 0 12px; border-radius: 14px; font-size: 13px; }
 .button:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
 
@@ -450,11 +456,15 @@
 .week-day em { display: block; }
 .filter-pill { min-height: 38px; border-radius: 999px; padding: 0 12px; border: 1px solid rgba(140,110,110,.55); background: transparent; color: var(--stone); font-weight: 800; }
 .filter-pill.active { background: var(--terracotta); color: white; border-color: var(--terracotta); }
-.activity-card { position: relative; display: grid; grid-template-columns: 38px 1fr; gap: 10px; background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
+.activity-card { position: relative; display: flex; gap: 12px; align-items: flex-start; background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
 .activity-card > i { position: absolute; top: 12px; right: 12px; width: 8px; height: 8px; border-radius: 50%; background: var(--terracotta); }
-.activity-icon { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--blue); color: white; }
-.activity-icon.playdate { background: var(--sage); }
-.activity-icon.sponsor { background: var(--amber); color: var(--charcoal); }
+.activity-icon { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: 0 0 auto; background: var(--blue); color: white; }
+.activity-icon.playdate,
+.activity-icon.confirmed { background: var(--sage); color: white; }
+.activity-icon.sponsor,
+.activity-icon.reminder { background: var(--amber); color: var(--charcoal); }
+.activity-icon.proposal,
+.activity-icon.default { background: var(--blue); color: white; }
 .activity-card strong { font-size: 15px; color: var(--charcoal); }
 .activity-card p { margin: 3px 0; color: var(--stone); font-size: 13px; }
 .activity-card small { color: var(--stone); font-size: 11px; }
