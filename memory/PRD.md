@@ -67,3 +67,25 @@ Build PlayPals, a mobile-first PWA for trusted school/community playdate coordin
 ## Remaining Before Founder Holistic Testing
 - Production email/domain setup intentionally deferred.
 - Founder to complete holistic product testing and report refinements.
+
+
+## Update — 2026-06-04 Full Product Update
+- Rebranded visible app surfaces and metadata to PlayPals.
+- Enforced 4-tab bottom navigation: Home, Playdates, Community, Profile.
+- Updated child age/grade support to ages 3–13 and Pre-K through Grade 7.
+- Added child status support: active, graduate, alumni, on_a_break, moved_on.
+- Added availability visibility modes: everyone, manual, request_only.
+- Rebuilt Home with stat tiles and privacy-safe match cards.
+- Rebuilt Playdates with week strip, activity feed, availability feed, real-slot proposals, and family cards.
+- Rebuilt Community as membership/discovery only with drill-down, grade communities, members, and step-back flow.
+- Added parent bottom sheet and availability share request flow.
+- Added contextual chat screen with locked completed/cancelled state.
+- Added match suppression rules: recent playdate within 14 days, dismissal tracking, negative reaction suppression.
+- Maintained global credit privacy: own credit count only on Profile; other parents show Animal Pack tier only.
+- Production email domain remains intentionally deferred; Resend testing limited to pritidhanda@gmail.com.
+
+## Verification — 2026-06-04
+- Backend regression suite passed 6/6.
+- Browser automation passed on canonical URL: PlayPals branding, 4 nav tabs, Home, Playdates, Community drill-down, visibility prompt, profile edit, child edit, real-slot proposal modal, and locked chat.
+- No mocked APIs detected.
+- Remaining minor testing note: future deterministic recheck of visible-feed suppression with controlled seeded overlaps.
