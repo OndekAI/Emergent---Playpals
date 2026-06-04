@@ -65,6 +65,7 @@ class ChildCreate(BaseModel):
     allergies: str = ""
     notes: str = ""
     photo_url: Optional[str] = None
+    status: str = "active"
 
 
 class ChildUpdate(BaseModel):
@@ -76,6 +77,8 @@ class ChildUpdate(BaseModel):
     allergies: Optional[str] = None
     notes: Optional[str] = None
     photo_url: Optional[str] = None
+    status: Optional[str] = None
+    alumni_class_year: Optional[int] = None
 
 
 class AvailabilityBlock(BaseModel):
@@ -87,6 +90,8 @@ class AvailabilityCreate(BaseModel):
     date: str
     blocks: List[AvailabilityBlock]
     recurrence: str = "once"
+    visibility_mode: str = "everyone"
+    visible_to_parent_ids: List[str] = []
 
 
 class CommunityCheckRequest(BaseModel):
@@ -172,8 +177,33 @@ class SponsorResponse(BaseModel):
     action: str
 
 
+class StepBackRequest(BaseModel):
+    reason: str
+    duration: Optional[str] = None
+
+
+class VisibilityUpdate(BaseModel):
+    visibility_mode: str
+    visible_to_parent_ids: List[str] = []
+
+
+class AvailabilityShareRequestCreate(BaseModel):
+    target_parent_id: str
+    community_id: Optional[str] = None
+
+
+class AvailabilityShareResponse(BaseModel):
+    action: str
+
+
+class MatchDismissalCreate(BaseModel):
+    target_parent_id: str
+    dismissal_type: str
+
+
 INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
-GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"]
+GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"]
+CHILD_STATUSES = ["active", "graduate", "alumni", "on_a_break", "moved_on"]
 
 
 def now_iso() -> str:
@@ -225,6 +255,37 @@ def tier_for_credits(credits: int) -> Dict[str, Any]:
     if credits <= 150:
         return {"name": "Proud Elephant", "badge": "🐘", "next": 151, "credits": credits}
     return {"name": "Mighty Lion", "badge": "🦁", "next": None, "credits": credits}
+
+
+async def public_parent(parent_id: str) -> Optional[Dict[str, Any]]:
+    parent = await db.users.find_one({"user_id": parent_id}, {"_id": 0})
+    if not parent:
+        return None
+    total = await credit_total(parent_id)
+    tier = tier_for_credits(total)
+    return {
+        "user_id": parent["user_id"],
+        "name": parent.get("name", "Parent"),
+        "picture": parent.get("picture", ""),
+        "neighborhood": parent.get("neighborhood", ""),
+        "tier": {"name": tier["name"], "badge": tier["badge"]},
+    }
+
+
+def grade_class_year(grade: str) -> int:
+    current = date.today()
+    school_year_end = current.year if current.month <= 6 else current.year + 1
+    if grade == "Grade 7":
+        return school_year_end
+    return school_year_end
+
+
+def status_from_step_back(reason: str) -> str:
+    if reason == "moved_schools":
+        return "moved_on"
+    if reason == "taking_break":
+        return "on_a_break"
+    return "alumni"
 
 
 def similarity(a: str, b: str) -> float:
@@ -312,6 +373,71 @@ async def credit_total(parent_id: str) -> int:
     return int(sum(row.get("amount", 0) for row in rows))
 
 
+async def children_for_parent(parent_id: str) -> List[Dict[str, Any]]:
+    return await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(20)
+
+
+async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
+    since = (date.today() - timedelta(days=14)).isoformat()
+    rows_a = await db.playdate_participants.find({"parent_id": parent_a}, {"_id": 0, "playdate_id": 1}).to_list(500)
+    ids_a = [row["playdate_id"] for row in rows_a]
+    if not ids_a:
+        return False
+    rows_b = await db.playdate_participants.find({"parent_id": parent_b, "playdate_id": {"$in": ids_a}}, {"_id": 0, "playdate_id": 1}).to_list(500)
+    ids = [row["playdate_id"] for row in rows_b]
+    if not ids:
+        return False
+    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered"]}})
+    return count > 0
+
+
+async def dismissal_suppressed(dismisser: str, target: str) -> bool:
+    dismissals = await db.match_dismissals.find({"dismisser_parent_id": dismisser, "target_parent_id": target}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    if len(dismissals) >= 3:
+        return True
+    for dismissal in dismissals:
+        if dismissal.get("dismissal_type") == "dont_suggest_again":
+            return True
+        if dismissal.get("dismissal_type") == "not_this_week":
+            created = parse_expiry(dismissal["created_at"])
+            if created > datetime.now(timezone.utc) - timedelta(days=7):
+                return True
+    return False
+
+
+async def negative_reaction_suppressed(parent_a: str, parent_b: str) -> bool:
+    rows_a = await db.playdate_participants.find({"parent_id": parent_a}, {"_id": 0, "playdate_id": 1}).to_list(500)
+    ids_a = [row["playdate_id"] for row in rows_a]
+    if not ids_a:
+        return False
+    rows_b = await db.playdate_participants.find({"parent_id": parent_b, "playdate_id": {"$in": ids_a}}, {"_id": 0, "playdate_id": 1}).to_list(500)
+    ids = [row["playdate_id"] for row in rows_b]
+    if not ids:
+        return False
+    count = await db.emoji_reactions.count_documents({"playdate_id": {"$in": ids}, "parent_id": {"$in": [parent_a, parent_b]}, "reaction": "not_right"})
+    return count >= 2
+
+
+async def match_pair_suppressed(parent_id: str, peer_id: str) -> bool:
+    if await has_recent_playdate_between(parent_id, peer_id):
+        return True
+    if await dismissal_suppressed(parent_id, peer_id):
+        return True
+    if await negative_reaction_suppressed(parent_id, peer_id):
+        return True
+    return False
+
+
+async def families_are_sharing(parent_a: str, parent_b: str) -> bool:
+    share = await db.availability_share_requests.find_one({
+        "$or": [
+            {"requester_parent_id": parent_a, "target_parent_id": parent_b, "status": "approved"},
+            {"requester_parent_id": parent_b, "target_parent_id": parent_a, "status": "approved"},
+        ]
+    }, {"_id": 0})
+    return bool(share)
+
+
 async def create_session(user_id: str, response: Response, session_token: Optional[str] = None) -> str:
     token = session_token or f"sess_{secrets.token_urlsafe(36)}"
     expires = datetime.now(timezone.utc) + timedelta(days=30)
@@ -380,8 +506,10 @@ async def notify_parent(parent_id: str, title: str, body: str, kind: str, refere
 async def ensure_global_seed() -> None:
     communities = [
         {"community_id": "comm_mulgrave", "name": "Mulgrave School", "type": "school", "city": "West Vancouver", "master_community_id": None},
-        {"community_id": "comm_mulgrave_g1", "name": "Mulgrave Grade 1", "type": "school", "city": "West Vancouver", "master_community_id": "comm_mulgrave"},
         {"community_id": "comm_kits", "name": "Kitsilano North Families", "type": "neighborhood", "city": "Vancouver", "master_community_id": None},
+    ] + [
+        {"community_id": f"comm_mulgrave_{grade.lower().replace(' ', '_').replace('-', '')}", "name": f"Mulgrave {grade}", "type": "grade", "city": "West Vancouver", "master_community_id": "comm_mulgrave"}
+        for grade in GRADES
     ]
     for community in communities:
         await db.communities.update_one(
@@ -406,19 +534,20 @@ async def ensure_global_seed() -> None:
         )
         await db.children.update_one(
             {"child_id": f"child_{user_id}"},
-            {"$setOnInsert": {"child_id": f"child_{user_id}", "parent_id": user_id, "first_name": child_name, "age": age, "grade": grade, "school_id": "comm_mulgrave", "interests": interests, "allergies": "", "notes": "", "photo_url": "", "is_alumni": False, "created_at": now_iso()}},
+            {"$setOnInsert": {"child_id": f"child_{user_id}", "parent_id": user_id, "first_name": child_name, "age": age, "grade": grade, "school_id": "comm_mulgrave", "interests": interests, "allergies": "", "notes": "", "photo_url": "", "status": "active", "is_alumni": False, "created_at": now_iso()}},
             upsert=True,
         )
-        for community_id in ["comm_mulgrave", "comm_mulgrave_g1"]:
+        grade_id = f"comm_mulgrave_{grade.lower().replace(' ', '_').replace('-', '')}"
+        for community_id in ["comm_mulgrave", grade_id]:
             await db.community_members.update_one(
                 {"community_id": community_id, "parent_id": user_id},
-                {"$setOnInsert": {"membership_id": new_id("member"), "community_id": community_id, "parent_id": user_id, "status": "active", "sponsor_id": "playpals", "joined_at": now_iso(), "provisional_expires_at": None}},
+                {"$setOnInsert": {"membership_id": new_id("member"), "community_id": community_id, "parent_id": user_id, "status": "active", "sponsor_id": "playpals", "availability_visibility_mode": "everyone", "joined_at": now_iso(), "provisional_expires_at": None}},
                 upsert=True,
             )
         slot_date = upcoming[(idx * 2 + 2) % len(upcoming)]
         await db.availability_slots.update_one(
             {"slot_id": f"slot_{user_id}_1"},
-            {"$set": {"slot_id": f"slot_{user_id}_1", "parent_id": user_id, "date": slot_date, "blocks": [{"start": "15:00", "end": "17:30"}], "is_recurring": False, "recurrence_rule": "once", "source_date": slot_date, "is_paused": False, "created_at": now_iso()}},
+            {"$set": {"slot_id": f"slot_{user_id}_1", "parent_id": user_id, "date": slot_date, "blocks": [{"start": "15:00", "end": "17:30"}], "is_recurring": False, "recurrence_rule": "once", "source_date": slot_date, "is_paused": False, "visibility_mode": "everyone", "visible_to_parent_ids": [], "created_at": now_iso()}},
             upsert=True,
         )
 
@@ -535,6 +664,8 @@ async def dashboard(user: Dict[str, Any] = Depends(current_user)):
     availability = await db.availability_slots.find({"parent_id": parent_id}, {"_id": 0}).to_list(500)
     matches = await find_matches(parent_id)
     profile = await enrich_user(user)
+    completed_count = await db.playdates.count_documents({"playdate_id": {"$in": [p["playdate_id"] for p in playdates]}, "status": "completed"}) if playdates else 0
+    sharing_count = await db.availability_share_requests.count_documents({"$or": [{"requester_parent_id": parent_id, "status": "approved"}, {"target_parent_id": parent_id, "status": "approved"}]})
     return {
         "parent": profile,
         "children": children,
@@ -544,6 +675,7 @@ async def dashboard(user: Dict[str, Any] = Depends(current_user)):
         "notifications": notifications,
         "availability": availability,
         "matches": matches,
+        "stats": {"playdates_completed": completed_count, "credits_earned": profile["credits"], "families_sharing_with_me": sharing_count, "availability_slots": len([s for s in availability if not s.get("is_paused")])},
         "onboarding": {
             "has_child": len(children) > 0,
             "has_availability": len(availability) > 0,
@@ -555,13 +687,18 @@ async def dashboard(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.post("/children")
 async def create_child(payload: ChildCreate, user: Dict[str, Any] = Depends(current_user)):
-    if payload.age < 1 or payload.age > 10:
-        raise HTTPException(status_code=400, detail="PlayPals supports children aged 1–10 in setup and focuses scheduling on ages 3–10")
+    if payload.age < 3 or payload.age > 13:
+        raise HTTPException(status_code=400, detail="PlayPals supports children ages 3–13")
+    if payload.grade not in GRADES:
+        raise HTTPException(status_code=400, detail="Grade must be Pre-K through Grade 7")
+    if payload.status not in CHILD_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid child status")
     child = {
         "child_id": new_id("child"),
         "parent_id": user["user_id"],
         **payload.model_dump(),
         "is_alumni": False,
+        "alumni_class_year": grade_class_year(payload.grade),
         "created_at": now_iso(),
     }
     await db.children.insert_one(child.copy())
@@ -580,8 +717,12 @@ async def update_child(child_id: str, payload: ChildUpdate, user: Dict[str, Any]
     if not child:
         raise HTTPException(status_code=404, detail="Child profile not found")
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
-    if "age" in updates and (updates["age"] < 1 or updates["age"] > 10):
-        raise HTTPException(status_code=400, detail="PlayPals supports children aged 1–10 in setup and focuses scheduling on ages 3–10")
+    if "age" in updates and (updates["age"] < 3 or updates["age"] > 13):
+        raise HTTPException(status_code=400, detail="PlayPals supports children ages 3–13")
+    if "grade" in updates and updates["grade"] not in GRADES:
+        raise HTTPException(status_code=400, detail="Grade must be Pre-K through Grade 7")
+    if "status" in updates and updates["status"] not in CHILD_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid child status")
     if updates:
         updates["updated_at"] = now_iso()
         await db.children.update_one({"child_id": child_id, "parent_id": user["user_id"]}, {"$set": updates})
@@ -609,6 +750,8 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
     if selected_date < date.today():
         raise HTTPException(status_code=400, detail="Past dates are view only")
     blocks = validate_blocks(payload.blocks)
+    if payload.visibility_mode not in ["everyone", "manual", "request_only"]:
+        raise HTTPException(status_code=400, detail="Invalid visibility mode")
     dates = [selected_date]
     if payload.recurrence == "weekly":
         dates = [selected_date + timedelta(days=7 * i) for i in range(53)]
@@ -623,6 +766,8 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
             "recurrence_rule": f"weekly:{selected_date.weekday()}" if payload.recurrence == "weekly" else "once",
             "source_date": selected_date.isoformat(),
             "is_paused": False,
+            "visibility_mode": payload.visibility_mode,
+            "visible_to_parent_ids": payload.visible_to_parent_ids if payload.visibility_mode == "manual" else [],
             "created_at": now_iso(),
         }
         await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat()})
@@ -648,9 +793,40 @@ async def list_communities(user: Dict[str, Any] = Depends(current_user)):
     memberships = await db.community_members.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(200)
     member_map = {member["community_id"]: member for member in memberships}
     for community in communities:
-        community["member_count"] = await db.community_members.count_documents({"community_id": community["community_id"], "status": {"$in": ["active", "provisional"]}})
+        community["member_count"] = await db.community_members.count_documents({"community_id": community["community_id"], "status": {"$in": ["active", "provisional", "pending_sponsor", "alumni", "on_a_break", "moved_on", "graduate"]}})
         community["membership"] = member_map.get(community["community_id"])
     return communities
+
+
+@api_router.get("/communities/{community_id}")
+async def community_detail(community_id: str, user: Dict[str, Any] = Depends(current_user)):
+    community = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    if not community:
+        raise HTTPException(status_code=404, detail="Community not found")
+    membership = await db.community_members.find_one({"community_id": community_id, "parent_id": user["user_id"]}, {"_id": 0})
+    master_id = community_id if not community.get("master_community_id") else community["master_community_id"]
+    grade_rows = []
+    for grade in GRADES:
+        grade_id = f"comm_mulgrave_{grade.lower().replace(' ', '_').replace('-', '')}" if master_id == "comm_mulgrave" else None
+        row = await db.communities.find_one({"community_id": grade_id}, {"_id": 0}) if grade_id else None
+        if not row:
+            row = {"community_id": f"grade_{grade.lower().replace(' ', '_')}", "name": grade, "type": "grade", "city": community.get("city", ""), "master_community_id": master_id, "status": "active"}
+        row["member_count"] = await db.community_members.count_documents({"community_id": row["community_id"], "status": {"$in": ["active", "provisional", "pending_sponsor"]}})
+        row["membership"] = await db.community_members.find_one({"community_id": row["community_id"], "parent_id": user["user_id"]}, {"_id": 0})
+        grade_rows.append(row)
+    other_rows = await db.communities.find({"master_community_id": master_id, "type": {"$nin": ["grade", "school"]}}, {"_id": 0}).to_list(100)
+    members = []
+    if membership and membership.get("status") == "active":
+        member_rows = await db.community_members.find({"community_id": community_id, "status": "active"}, {"_id": 0}).to_list(200)
+        for row in member_rows:
+            parent = await public_parent(row["parent_id"])
+            children = await children_for_parent(row["parent_id"])
+            if parent:
+                parent["children"] = children
+                parent["sharing"] = await families_are_sharing(user["user_id"], row["parent_id"])
+                members.append(parent)
+    community["member_count"] = await db.community_members.count_documents({"community_id": community_id})
+    return {"community": community, "membership": membership, "grades": grade_rows, "other": other_rows, "members": members}
 
 
 @api_router.post("/communities/check-duplicate")
@@ -684,7 +860,7 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
         "created_at": now_iso(),
     }
     await db.communities.insert_one(community.copy())
-    await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "joined_at": now_iso(), "provisional_expires_at": None})
+    await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if payload.type in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
     await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
     return {"created": True, "community": community, "duplicate_check": duplicate}
 
@@ -707,12 +883,78 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
     elif payload.teacher_name and payload.child_grade:
         status = "active"
         await add_credit(user["user_id"], 1, "school_verified_join", payload.community_id)
-    membership = {"membership_id": new_id("member"), "community_id": payload.community_id, "parent_id": user["user_id"], "status": status, "sponsor_id": sponsor_id, "joined_at": now_iso(), "provisional_expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat() if status == "provisional" else None}
+    membership = {"membership_id": new_id("member"), "community_id": payload.community_id, "parent_id": user["user_id"], "status": status, "sponsor_id": sponsor_id, "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat() if status == "provisional" else None}
     await db.community_members.insert_one(membership.copy())
     if sponsor_id:
         await notify_parent(sponsor_id, "Sponsor request", f"{user['name']} wants to join {community['name']}. Do you know them?", "sponsor", membership["membership_id"])
     await notify_parent(user["user_id"], "Community joined", f"You're now {status} in {community['name']}.", "community", payload.community_id)
     return {"membership": membership, "community": community}
+
+
+@api_router.post("/communities/{community_id}/step-back")
+async def step_back_community(community_id: str, payload: StepBackRequest, user: Dict[str, Any] = Depends(current_user)):
+    status = status_from_step_back(payload.reason)
+    updates = {"status": status, "stepped_back_at": now_iso(), "step_back_reason": payload.reason}
+    if status == "on_a_break":
+        days = {"2_weeks": 14, "1_month": 30, "3_months": 90}.get(payload.duration or "2_weeks", 14)
+        updates["reactivates_at"] = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    result = await db.community_members.update_one({"community_id": community_id, "parent_id": user["user_id"]}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    community = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    return {"status": status, "message": f"You've stepped back from {community['name']}. Your history and credits are safe. 💛"}
+
+
+@api_router.put("/communities/{community_id}/visibility")
+async def update_community_visibility(community_id: str, payload: VisibilityUpdate, user: Dict[str, Any] = Depends(current_user)):
+    if payload.visibility_mode not in ["everyone", "manual", "request_only"]:
+        raise HTTPException(status_code=400, detail="Invalid visibility mode")
+    result = await db.community_members.update_one({"community_id": community_id, "parent_id": user["user_id"]}, {"$set": {"availability_visibility_mode": payload.visibility_mode, "visible_to_parent_ids": payload.visible_to_parent_ids, "updated_at": now_iso()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    return {"ok": True}
+
+
+@api_router.post("/availability-share-requests")
+async def request_availability_share(payload: AvailabilityShareRequestCreate, user: Dict[str, Any] = Depends(current_user)):
+    if payload.target_parent_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot request yourself")
+    existing = await db.availability_share_requests.find_one({"requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "status": {"$in": ["pending", "approved"]}}, {"_id": 0})
+    if existing:
+        return existing
+    target_membership = await db.community_members.find_one({"parent_id": payload.target_parent_id, "availability_visibility_mode": "everyone"}, {"_id": 0})
+    status = "approved" if target_membership else "pending"
+    request_doc = {"request_id": new_id("share"), "requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "community_id": payload.community_id, "status": status, "created_at": now_iso(), "responded_at": now_iso() if status == "approved" else None}
+    await db.availability_share_requests.insert_one(request_doc.copy())
+    if status == "approved":
+        await add_credit(user["user_id"], 1, "availability_share", payload.target_parent_id)
+        await add_credit(payload.target_parent_id, 1, "availability_share", user["user_id"])
+    else:
+        await notify_parent(payload.target_parent_id, "Availability share request", f"{user['name']} wants to share availability with you", "availability_share", request_doc["request_id"])
+    return request_doc
+
+
+@api_router.post("/availability-share-requests/{request_id}/respond")
+async def respond_availability_share(request_id: str, payload: AvailabilityShareResponse, user: Dict[str, Any] = Depends(current_user)):
+    share = await db.availability_share_requests.find_one({"request_id": request_id, "target_parent_id": user["user_id"], "status": "pending"}, {"_id": 0})
+    if not share:
+        raise HTTPException(status_code=404, detail="Share request not found")
+    status = "approved" if payload.action == "approve" else "declined"
+    await db.availability_share_requests.update_one({"request_id": request_id}, {"$set": {"status": status, "responded_at": now_iso()}})
+    if status == "approved":
+        await add_credit(user["user_id"], 1, "availability_share", share["requester_parent_id"])
+        await add_credit(share["requester_parent_id"], 1, "availability_share", user["user_id"])
+        await notify_parent(share["requester_parent_id"], "Availability sharing approved", f"You're now sharing availability with {user['name']} 🎉", "availability_share", request_id)
+    return {"status": status}
+
+
+@api_router.post("/matches/dismiss")
+async def dismiss_match(payload: MatchDismissalCreate, user: Dict[str, Any] = Depends(current_user)):
+    if payload.dismissal_type not in ["not_this_week", "dont_suggest_again"]:
+        raise HTTPException(status_code=400, detail="Invalid dismissal type")
+    doc = {"dismissal_id": new_id("dismiss"), "dismisser_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "dismissal_type": payload.dismissal_type, "created_at": now_iso()}
+    await db.match_dismissals.insert_one(doc.copy())
+    return doc
 
 
 @api_router.get("/sponsor-requests")
@@ -745,11 +987,11 @@ async def respond_sponsor_request(membership_id: str, payload: SponsorResponse, 
 
 
 async def common_community_parent_ids(parent_id: str) -> List[str]:
-    memberships = await db.community_members.find({"parent_id": parent_id, "status": {"$in": ["active", "provisional"]}}, {"_id": 0}).to_list(100)
+    memberships = await db.community_members.find({"parent_id": parent_id, "status": {"$in": ["active", "provisional", "pending_sponsor"]}}, {"_id": 0}).to_list(100)
     community_ids = [m["community_id"] for m in memberships]
     if not community_ids:
         return []
-    peer_members = await db.community_members.find({"community_id": {"$in": community_ids}, "status": {"$in": ["active", "provisional"]}}, {"_id": 0}).to_list(500)
+    peer_members = await db.community_members.find({"community_id": {"$in": community_ids}, "status": {"$in": ["active", "provisional", "pending_sponsor"]}}, {"_id": 0}).to_list(500)
     return list({m["parent_id"] for m in peer_members if m["parent_id"] != parent_id})
 
 
@@ -759,7 +1001,7 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
     end = (date.today() + timedelta(days=21)).isoformat()
     feed = []
     for peer_id in peers:
-        parent = await db.users.find_one({"user_id": peer_id}, {"_id": 0})
+        parent = await public_parent(peer_id)
         children = await db.children.find({"parent_id": peer_id}, {"_id": 0}).to_list(10)
         slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
         if parent and slots:
@@ -782,6 +1024,8 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     for slot in own_slots:
         own_by_date.setdefault(slot["date"], []).extend(slot.get("blocks", []))
     for peer_id in peers:
+        if await match_pair_suppressed(parent_id, peer_id):
+            continue
         peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
         for slot in peer_slots:
             for own_block in own_by_date.get(slot["date"], []):
@@ -789,9 +1033,11 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
                     start = max(minutes(own_block["start"]), minutes(peer_block["start"]))
                     end = min(minutes(own_block["end"]), minutes(peer_block["end"]))
                     if end - start >= 90:
-                        parent = await db.users.find_one({"user_id": peer_id}, {"_id": 0})
+                        parent = await public_parent(peer_id)
                         peer_children = await db.children.find({"parent_id": peer_id}, {"_id": 0}).to_list(10)
                         own_children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(10)
+                        interest_overlap = len(set((peer_children[0].get("interests", []) if peer_children else [])) & set((own_children[0].get("interests", []) if own_children else [])))
+                        score = min(96, 55 + min(25, int((end - start - 90) / 3)) + interest_overlap * 6)
                         matches.append({
                             "match_id": f"match_{peer_id}_{slot['date']}_{start}",
                             "parent": parent,
@@ -801,6 +1047,8 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
                             "start_time": f"{start // 60:02d}:{start % 60:02d}",
                             "end_time": f"{end // 60:02d}:{end % 60:02d}",
                             "duration_minutes": end - start,
+                            "score": score,
+                            "score_label": "Great match" if score >= 80 else "Good overlap",
                         })
     matches.sort(key=lambda row: row["duration_minutes"], reverse=True)
     return matches[:8]
@@ -817,7 +1065,7 @@ async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
     for playdate in playdates:
         participants = await db.playdate_participants.find({"playdate_id": playdate["playdate_id"]}, {"_id": 0}).to_list(20)
         for participant in participants:
-            participant["parent"] = await db.users.find_one({"user_id": participant["parent_id"]}, {"_id": 0})
+            participant["parent"] = await public_parent(participant["parent_id"])
             participant["children"] = await db.children.find({"child_id": {"$in": participant.get("child_ids", [])}}, {"_id": 0}).to_list(10)
         playdate["participants"] = participants
     return playdates
@@ -850,6 +1098,8 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         "created_at": now_iso(),
     }
     await db.playdates.insert_one(playdate.copy())
+    for invitee in payload.invitee_parent_ids:
+        await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": invitee, "dismissal_type": "dont_suggest_again"})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
     for invitee in payload.invitee_parent_ids[:6]:
         await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": invitee, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
@@ -947,7 +1197,7 @@ async def send_message(playdate_id: str, payload: ChatMessageCreate, user: Dict[
     participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
     if not playdate or not participant:
         raise HTTPException(status_code=403, detail="Chat unavailable")
-    if playdate["status"] == "completed":
+    if playdate["status"] in ["completed", "cancelled"]:
         raise HTTPException(status_code=400, detail="This playdate has ended. Start a new one?")
     if playdate["status"] not in ["confirmed", "rescheduled"]:
         raise HTTPException(status_code=400, detail="Chat opens after a playdate is confirmed")
@@ -995,8 +1245,11 @@ app.include_router(api_router)
 cors_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
 cors_kwargs = {"allow_credentials": True, "allow_methods": ["*"], "allow_headers": ["*"]}
 if "*" in cors_origins:
-    cors_kwargs["allow_origins"] = []
-    cors_kwargs["allow_origin_regex"] = ".*"
+    cors_kwargs["allow_origins"] = [
+        "https://pals-availability.preview.emergentagent.com",
+        "https://c959650a-19c2-4536-8433-f2d6f78d1686.preview.emergentagent.com",
+    ]
+    cors_kwargs["allow_origin_regex"] = r"https://.*\.preview\.emergentagent\.com"
 else:
     cors_kwargs["allow_origins"] = cors_origins
 app.add_middleware(CORSMiddleware, **cors_kwargs)
