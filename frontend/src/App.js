@@ -20,6 +20,7 @@ import {
   Mail,
   MapPin,
   MessageCircle,
+  Pencil,
   Plus,
   Search,
   Send,
@@ -269,6 +270,11 @@ function HomePage({ user, dashboard, refresh }) {
   const navigate = useNavigate();
   const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered"].includes(p.status)).slice(0, 3);
   const match = dashboard?.matches?.[0];
+  const [sponsorRequests, setSponsorRequests] = useState([]);
+
+  useEffect(() => {
+    api("/sponsor-requests").then(setSponsorRequests).catch(() => setSponsorRequests([]));
+  }, [dashboard]);
 
   const proposeMatch = () => {
     navigate("/community", { state: { match } });
@@ -293,6 +299,13 @@ function HomePage({ user, dashboard, refresh }) {
         </section>
 
         <OnboardingCard dashboard={dashboard} navigate={navigate} />
+
+        {!!sponsorRequests.length && (
+          <section className="card stack" data-testid="sponsor-requests-card">
+            <span className="badge blue" data-testid="sponsor-requests-badge">Sponsor requests</span>
+            {sponsorRequests.map((request) => <SponsorRequestCard key={request.membership_id} request={request} refresh={async () => { await refresh(); setSponsorRequests(await api("/sponsor-requests")); }} />)}
+          </section>
+        )}
 
         {match && (
           <section className="card stack" data-testid="auto-match-card">
@@ -327,6 +340,28 @@ function HomePage({ user, dashboard, refresh }) {
         </section>
       </div>
     </AppLayout>
+  );
+}
+
+function SponsorRequestCard({ request, refresh }) {
+  const respond = async (action) => {
+    try {
+      await api(`/sponsor-requests/${request.membership_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
+      toast.success(action === "approve" ? "Sponsor approved" : "Sponsor declined");
+      await refresh();
+    } catch (error) { toast.error(error.message); }
+  };
+  return (
+    <div className="mini-card stack" data-testid={`sponsor-request-${request.membership_id}`}>
+      <div>
+        <strong data-testid={`sponsor-request-parent-${request.membership_id}`}>{request.parent?.name}</strong>
+        <p className="muted" data-testid={`sponsor-request-detail-${request.membership_id}`}>wants to join {request.community?.name}</p>
+      </div>
+      <div className="proposal-actions">
+        <button className="button sage small" onClick={() => respond("approve")} data-testid={`sponsor-approve-${request.membership_id}`}>Yes, approve</button>
+        <button className="button secondary small" onClick={() => respond("decline")} data-testid={`sponsor-decline-${request.membership_id}`}>No</button>
+      </div>
+    </div>
   );
 }
 
@@ -701,6 +736,7 @@ function JoinCommunityModal({ communities, onClose, refreshAll }) {
 function PlaydateCard({ playdate, user, refresh }) {
   const [showChat, setShowChat] = useState(false);
   const [showComplete, setShowComplete] = useState(false);
+  const [showReschedule, setShowReschedule] = useState(false);
   const isInvitee = playdate.participants?.some((p) => p.parent_id === user.user_id && p.rsvp_status === "invited");
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
   const respond = async (action) => {
@@ -729,12 +765,41 @@ function PlaydateCard({ playdate, user, refresh }) {
         {isInvitee && <button className="button sage small" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>}
         {isInvitee && <button className="button secondary small" onClick={() => respond("decline")} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>}
         {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button blue small" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Chat</button>}
+        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>}
         {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={cancel} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Sick day cancel</button>}
         {playdate.status !== "completed" && <button className="button ghost small" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>}
       </div>
       {showChat && <ChatModal playdate={playdate} onClose={() => setShowChat(false)} />}
+      {showReschedule && <RescheduleModal playdate={playdate} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
     </article>
+  );
+}
+
+function RescheduleModal({ playdate, refresh, onClose }) {
+  const [date, setDate] = useState(playdate.date);
+  const [start, setStart] = useState(playdate.start_time);
+  const [end, setEnd] = useState(playdate.end_time);
+  const submit = async () => {
+    try {
+      await api(`/playdates/${playdate.playdate_id}/reschedule`, { method: "POST", body: JSON.stringify({ date, start_time: start, end_time: end }) });
+      toast.success("Reschedule request sent");
+      await refresh();
+      onClose();
+    } catch (error) { toast.error(error.message); }
+  };
+  return (
+    <div className="center-overlay" data-testid="reschedule-modal-overlay">
+      <section className="modal-panel stack" data-testid="reschedule-modal">
+        <div className="sheet-title-row"><h3 data-testid="reschedule-title">Reschedule</h3><button className="icon-button" onClick={onClose} data-testid="reschedule-close-button"><X size={20} /></button></div>
+        <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="reschedule-date-input" />
+        <div className="row" style={{ gap: 8 }}>
+          <select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="reschedule-start-select">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+          <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="reschedule-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+        </div>
+        <button className="button primary" onClick={submit} data-testid="reschedule-submit-button">Send reschedule request</button>
+      </section>
+    </div>
   );
 }
 
@@ -796,6 +861,7 @@ function GroupPlaydateModal({ dashboard, refresh, onClose }) {
   const [location, setLocation] = useState("Community playground");
   const [activity, setActivity] = useState("Group free play");
   const families = dashboard?.matches?.map((m) => m.parent) || [];
+  const overlays = dashboard?.matches?.filter((m) => selected.includes(m.parent.user_id)).slice(0, 5) || [];
   const toggle = (id) => setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 6 ? [...prev, id] : prev);
   const send = async () => {
     try {
@@ -809,6 +875,20 @@ function GroupPlaydateModal({ dashboard, refresh, onClose }) {
         <div className="sheet-title-row"><h3 data-testid="group-title">New Group Playdate</h3><button className="icon-button" onClick={onClose} data-testid="group-close-button"><X size={20} /></button></div>
         <div className="chip-row" data-testid="group-family-options">{families.map((f) => <button key={f.user_id} className={`chip ${selected.includes(f.user_id) ? "active" : ""}`} onClick={() => toggle(f.user_id)} data-testid={`group-family-${f.user_id}`}>{f.name}</button>)}</div>
         {!families.length && <p className="muted" data-testid="group-no-families">Add availability and join communities to surface families.</p>}
+        <div className="group-overlay-card" data-testid="group-calendar-overlay">
+          <div className="family-head"><strong data-testid="group-overlay-title">Calendar overlay</strong><span className="badge amber">Amber = shared opening</span></div>
+          {overlays.length ? overlays.map((match, index) => {
+            const left = ((minutes(match.start_time) - 360) / 900) * 100;
+            const width = ((minutes(match.end_time) - minutes(match.start_time)) / 900) * 100;
+            return (
+              <div className="overlay-row" key={match.match_id} data-testid={`group-overlay-row-${match.parent.user_id}`}>
+                <span data-testid={`group-overlay-name-${match.parent.user_id}`}>{match.parent.name.split(" ")[0]}</span>
+                <div className="overlay-track"><i style={{ left: `${left}%`, width: `${width}%`, opacity: 0.4 + index * 0.08 }} /></div>
+              </div>
+            );
+          }) : <p className="muted" data-testid="group-overlay-empty">Select 2–6 families to compare openings.</p>}
+          {overlays.length >= 2 && <button className="slot-button overlap" type="button" onClick={() => { setDate(overlays[0].date); setStart(overlays[0].start_time); setEnd(overlays[0].end_time); }} data-testid="group-amber-overlap-button">Use amber overlap · {fmtDate(overlays[0].date, { weekday: "short", month: "short", day: "numeric" })} {timeLabel(overlays[0].start_time)}–{timeLabel(overlays[0].end_time)}</button>}
+        </div>
         <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="group-date-input" />
         <div className="row" style={{ gap: 8 }}><select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="group-start-select">{timeOptions.map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select><select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="group-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select></div>
         <input className="input" value={location} onChange={(e) => setLocation(e.target.value)} data-testid="group-location-input" /><input className="input" value={activity} onChange={(e) => setActivity(e.target.value)} data-testid="group-activity-input" />
@@ -821,13 +901,22 @@ function GroupPlaydateModal({ dashboard, refresh, onClose }) {
 function ProfilePage({ user, dashboard, refresh }) {
   const [showChild, setShowChild] = useState(false);
   const [editingChild, setEditingChild] = useState(null);
+  const [showParentEdit, setShowParentEdit] = useState(false);
   const logout = async () => { await api("/auth/logout", { method: "POST" }); window.location.href = "/login"; };
   return (
     <AppLayout title="Profile" user={user}>
       <div className="stack stagger">
         <section className="card stack" data-testid="profile-parent-card">
-          <div className="row" style={{ gap: 12 }}><div className="avatar-circle" style={{ width: 52, height: 52 }} data-testid="profile-avatar">{user?.name?.[0] || "P"}</div><div><h1 className="section-title" data-testid="profile-name">{user?.name}</h1><p className="muted" data-testid="profile-email">{user?.email}</p></div></div>
+          <div className="family-head">
+            <div className="row" style={{ gap: 12 }}><div className="avatar-circle" style={{ width: 52, height: 52 }} data-testid="profile-avatar">{user?.name?.[0] || "P"}</div><div><h1 className="section-title" data-testid="profile-name">{user?.name}</h1><p className="muted" data-testid="profile-email">{user?.email}</p></div></div>
+            <button className="button small secondary" onClick={() => setShowParentEdit(true)} data-testid="edit-parent-profile-button"><Pencil size={15} /> Edit</button>
+          </div>
           <span className="badge amber" data-testid="profile-tier-badge">{user?.tier?.badge} {user?.tier?.name} · {user?.credits || 0} credits</span>
+          <div className="chip-row" data-testid="profile-contact-summary">
+            <span className="badge blue">{user?.contact_preference || "email"}</span>
+            {user?.phone && <span className="badge sage">{user.phone}</span>}
+            {user?.neighborhood && <span className="badge terra">{user.neighborhood}</span>}
+          </div>
         </section>
         <section className="stack" data-testid="children-section">
           <div className="family-head"><h2 className="section-title" data-testid="children-title">Children</h2><button className="button small primary" onClick={() => setShowChild(true)} data-testid="add-child-open-button"><Plus size={16} /> Add</button></div>
@@ -843,12 +932,47 @@ function ProfilePage({ user, dashboard, refresh }) {
           ))}
           {!dashboard?.children?.length && <div className="empty-state card" data-testid="children-empty-state">Add a child profile to unlock scheduling.</div>}
         </section>
-        <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email on</span><span className="badge blue">Push ready</span><span className="badge amber">SMS optional</span></div></section>
+        <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email {user?.notification_preferences?.email ? "on" : "off"}</span><span className="badge blue">Push {user?.notification_preferences?.push ? "on" : "off"}</span><span className="badge amber">SMS {user?.notification_preferences?.sms ? "on" : "off"}</span></div></section>
         <button className="button secondary" onClick={logout} data-testid="logout-button">Log out</button>
       </div>
       {showChild && <ChildModal onClose={() => setShowChild(false)} refresh={refresh} />}
       {editingChild && <ChildModal child={editingChild} onClose={() => setEditingChild(null)} refresh={refresh} />}
+      {showParentEdit && <ParentProfileModal user={user} refresh={refresh} onClose={() => setShowParentEdit(false)} />}
     </AppLayout>
+  );
+}
+
+function ParentProfileModal({ user, refresh, onClose }) {
+  const [form, setForm] = useState({
+    name: user?.name || "",
+    phone: user?.phone || "",
+    neighborhood: user?.neighborhood || "",
+    contact_preference: user?.contact_preference || "email",
+    notification_preferences: user?.notification_preferences || { email: true, push: true, sms: false },
+  });
+  const toggleNotification = (key) => setForm((prev) => ({ ...prev, notification_preferences: { ...prev.notification_preferences, [key]: !prev.notification_preferences?.[key] } }));
+  const save = async () => {
+    try {
+      await api("/profile", { method: "PUT", body: JSON.stringify(form) });
+      toast.success("Profile updated");
+      await refresh();
+      onClose();
+    } catch (error) { toast.error(error.message); }
+  };
+  return (
+    <div className="center-overlay" data-testid="parent-profile-modal-overlay">
+      <section className="modal-panel stack" data-testid="parent-profile-modal">
+        <div className="sheet-title-row"><h3 data-testid="parent-profile-title">Edit Parent Profile</h3><button className="icon-button" onClick={onClose} data-testid="parent-profile-close-button"><X size={20} /></button></div>
+        <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="First name" data-testid="parent-name-input" />
+        <input className="input" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Phone number" data-testid="parent-phone-input" />
+        <input className="input" value={form.neighborhood} onChange={(e) => setForm({ ...form, neighborhood: e.target.value })} placeholder="Neighborhood / area" data-testid="parent-neighborhood-input" />
+        <select className="select" value={form.contact_preference} onChange={(e) => setForm({ ...form, contact_preference: e.target.value })} data-testid="parent-contact-preference-select"><option value="email">Email</option><option value="sms">SMS</option><option value="in_app">In-app only</option></select>
+        <div className="chip-row" data-testid="notification-toggle-row">
+          {[["email", "Email"], ["push", "Push"], ["sms", "SMS"]].map(([key, label]) => <button key={key} className={`chip ${form.notification_preferences?.[key] ? "active" : ""}`} onClick={() => toggleNotification(key)} data-testid={`notification-${key}-toggle`}>{label}</button>)}
+        </div>
+        <button className="button primary" onClick={save} data-testid="parent-profile-save-button">Save parent profile</button>
+      </section>
+    </div>
   );
 }
 

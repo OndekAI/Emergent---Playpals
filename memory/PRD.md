@@ -54,3 +54,16 @@ Build PlayPals, a mobile-first PWA for trusted school/community playdate coordin
 1. Confirm the email address to use for magic-link testing under the current Resend account.
 2. Continue UI QA on mobile widths.
 3. Add any refinements requested after founder review.
+
+
+## Update — 2026-06-04 Product Gap Completion
+- Added parent profile editing for name, phone, neighborhood, contact preference, and notification preferences.
+- Added full child profile edit flow from Profile screen.
+- Added sponsor request workflow: pending sponsor status, sponsor request cards, approve/decline actions, and credit awards.
+- Added reschedule UI for confirmed/rescheduled playdates.
+- Added visual group playdate calendar overlay with up to 5 selected family availability tracks and amber overlap shortcut.
+- Confirmed Resend remains limited to pritidhanda@gmail.com until domain verification is handled later.
+
+## Remaining Before Founder Holistic Testing
+- Production email/domain setup intentionally deferred.
+- Founder to complete holistic product testing and report refinements.

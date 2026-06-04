@@ -501,6 +501,42 @@
 .slot-button { width: 100%; border: 1px dashed rgba(157,184,154,.8); background: rgba(157,184,154,.12); border-radius: 14px; min-height: 52px; text-align: left; padding: 10px 12px; font-weight: 800; color: var(--charcoal); }
 .slot-button.overlap { border-color: var(--amber); background: rgba(245,192,122,.22); }
 
+.group-overlay-card {
+    border-radius: 16px;
+    background: #fff;
+    border: 1px solid rgba(45,42,39,.06);
+    padding: 12px;
+    display: grid;
+    gap: 10px;
+}
+
+.overlay-row {
+    display: grid;
+    grid-template-columns: 76px 1fr;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--stone);
+}
+
+.overlay-track {
+    height: 18px;
+    position: relative;
+    border-radius: 999px;
+    background: rgba(140,110,110,.10);
+    overflow: hidden;
+}
+
+.overlay-track i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 999px;
+    background: var(--sage);
+    border: 1px dashed #5f835b;
+}
+
 .modal-panel {
     width: calc(100% - 32px);
     max-width: 448px;

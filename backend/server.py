@@ -160,6 +160,18 @@ class ContactShareRequest(BaseModel):
     method: str
 
 
+class ParentProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    neighborhood: Optional[str] = None
+    contact_preference: Optional[str] = None
+    notification_preferences: Optional[Dict[str, bool]] = None
+
+
+class SponsorResponse(BaseModel):
+    action: str
+
+
 INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
 GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"]
 
@@ -494,6 +506,18 @@ async def logout(request: Request, response: Response):
     return {"ok": True}
 
 
+@api_router.put("/profile")
+async def update_parent_profile(payload: ParentProfileUpdate, user: Dict[str, Any] = Depends(current_user)):
+    updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if updates.get("contact_preference") and updates["contact_preference"] not in ["email", "sms", "in_app"]:
+        raise HTTPException(status_code=400, detail="Contact preference must be email, sms, or in_app")
+    if updates:
+        updates["updated_at"] = now_iso()
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": updates})
+    updated = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    return {"user": await enrich_user(updated)}
+
+
 @api_router.get("/meta")
 async def meta():
     return {"interests": INTERESTS, "grades": GRADES}
@@ -679,16 +703,45 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
         if sponsor:
             sponsor_id = sponsor["user_id"]
-            status = "active"
-            await add_credit(sponsor_id, 2, "sponsored_member", user["user_id"])
-            await add_credit(user["user_id"], 1, "joined_with_sponsor", payload.community_id)
+            status = "pending_sponsor"
     elif payload.teacher_name and payload.child_grade:
         status = "active"
         await add_credit(user["user_id"], 1, "school_verified_join", payload.community_id)
     membership = {"membership_id": new_id("member"), "community_id": payload.community_id, "parent_id": user["user_id"], "status": status, "sponsor_id": sponsor_id, "joined_at": now_iso(), "provisional_expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat() if status == "provisional" else None}
     await db.community_members.insert_one(membership.copy())
+    if sponsor_id:
+        await notify_parent(sponsor_id, "Sponsor request", f"{user['name']} wants to join {community['name']}. Do you know them?", "sponsor", membership["membership_id"])
     await notify_parent(user["user_id"], "Community joined", f"You're now {status} in {community['name']}.", "community", payload.community_id)
     return {"membership": membership, "community": community}
+
+
+@api_router.get("/sponsor-requests")
+async def sponsor_requests(user: Dict[str, Any] = Depends(current_user)):
+    requests_list = await db.community_members.find({"sponsor_id": user["user_id"], "status": "pending_sponsor"}, {"_id": 0}).to_list(100)
+    for row in requests_list:
+        row["community"] = await db.communities.find_one({"community_id": row["community_id"]}, {"_id": 0})
+        row["parent"] = await db.users.find_one({"user_id": row["parent_id"]}, {"_id": 0})
+        row["children"] = await db.children.find({"parent_id": row["parent_id"]}, {"_id": 0}).to_list(10)
+    return requests_list
+
+
+@api_router.post("/sponsor-requests/{membership_id}/respond")
+async def respond_sponsor_request(membership_id: str, payload: SponsorResponse, user: Dict[str, Any] = Depends(current_user)):
+    membership = await db.community_members.find_one({"membership_id": membership_id, "sponsor_id": user["user_id"], "status": "pending_sponsor"}, {"_id": 0})
+    if not membership:
+        raise HTTPException(status_code=404, detail="Sponsor request not found")
+    community = await db.communities.find_one({"community_id": membership["community_id"]}, {"_id": 0})
+    if payload.action == "approve":
+        await db.community_members.update_one({"membership_id": membership_id}, {"$set": {"status": "active", "approved_at": now_iso()}})
+        await add_credit(user["user_id"], 2, "sponsored_member", membership["parent_id"])
+        await add_credit(membership["parent_id"], 1, "joined_with_sponsor", membership["community_id"])
+        await notify_parent(membership["parent_id"], "Sponsor approved", f"You're active in {community['name']}.", "community", membership["community_id"])
+        return {"status": "active"}
+    if payload.action == "decline":
+        await db.community_members.update_one({"membership_id": membership_id}, {"$set": {"status": "declined", "declined_at": now_iso()}})
+        await notify_parent(membership["parent_id"], "Sponsor declined", f"You can name a different sponsor for {community['name']}.", "community", membership["community_id"])
+        return {"status": "declined"}
+    raise HTTPException(status_code=400, detail="Action must be approve or decline")
 
 
 async def common_community_parent_ids(parent_id: str) -> List[str]:
