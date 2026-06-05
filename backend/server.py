@@ -602,16 +602,22 @@ async def verify_magic_link(payload: MagicVerifyRequest, response: Response):
 
 @api_router.post("/auth/oauth/session")
 async def oauth_session(payload: OAuthSessionRequest, response: Response):
-    emergent_response = requests.get(
-        "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-        headers={"X-Session-ID": payload.session_id},
+    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    supabase_response = requests.get(
+        f"{supabase_url}/auth/v1/user",
+        headers={"Authorization": f"Bearer {payload.session_id}"},
         timeout=12,
     )
-    if emergent_response.status_code >= 400:
+    if supabase_response.status_code >= 400:
         raise HTTPException(status_code=401, detail="Google session could not be verified")
-    data = emergent_response.json()
-    user = await upsert_user(data["email"], data.get("name"), data.get("picture"))
-    await create_session(user["user_id"], response, data.get("session_token"))
+    data = supabase_response.json()
+    user_meta = data.get("user_metadata", {})
+    user = await upsert_user(
+        data["email"],
+        user_meta.get("full_name") or user_meta.get("name"),
+        user_meta.get("avatar_url") or user_meta.get("picture"),
+    )
+    await create_session(user["user_id"], response, payload.session_id)
     return {"user": await enrich_user(user)}
 
 
@@ -1249,7 +1255,7 @@ if "*" in cors_origins:
         "https://pals-availability.preview.emergentagent.com",
         "https://c959650a-19c2-4536-8433-f2d6f78d1686.preview.emergentagent.com",
     ]
-    cors_kwargs["allow_origin_regex"] = r"https://.*\.preview\.emergentagent\.com"
+    cors_kwargs["allow_origin_regex"] = r"https://.*\.(preview\.emergentagent\.com|vercel\.app)"
 else:
     cors_kwargs["allow_origins"] = cors_origins
 app.add_middleware(CORSMiddleware, **cors_kwargs)
