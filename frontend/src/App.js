@@ -80,11 +80,14 @@ const tierText = (parent) => parent?.tier ? `${parent.tier.badge} ${parent.tier.
 const firstChild = (children) => children?.[0] || {};
 
 function LogoMark({ testId = "logo-mark" }) {
-  return (
-    <div className="logo-mark" data-testid={testId} aria-label="PlayPals logo">
-      <span /><span /><span />
-    </div>
-  );
+    return (
+          <img
+        src="data:image/png;base64,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"
+        alt="PlayPals"
+        className="logo-mark"
+        data-testid={testId}
+      />
+            );
 }
 
 function LoadingScreen() {
