@@ -73,28 +73,12 @@
 }
 
 .logo-mark {
-    width: auto;
-    height: 18px;
-    border-radius: 999px;
-    background: transparent;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    box-shadow: none;
-    flex: 0 0 auto;
+        width: 32px;
+        height: 32px;
+        object-fit: contain;
+        display: block;
+        flex: 0 0 auto;
 }
-
-.logo-mark span {
-    width: 13px;
-    height: 18px;
-    border-radius: 999px;
-    display: block;
-}
-
-.logo-mark span:nth-child(1) { background: #d98b73; }
-.logo-mark span:nth-child(2) { background: #a8bd9e; }
-.logo-mark span:nth-child(3) { background: #f3cf91; }
 
 .brand-name {
     font-family: "Quicksand", sans-serif;
