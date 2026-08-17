@@ -296,6 +296,18 @@ def similarity(a: str, b: str) -> float:
     return len(a_tokens & b_tokens) / len(a_tokens | b_tokens)
 
 
+# NOTE (UAT fix, Aug 16 2026): "onboarding@resend.dev" is Resend's shared
+# sandbox sender. In sandbox mode Resend silently refuses to deliver to any
+# address other than the Resend account owner's own verified email, which
+# blocks every real user's magic-link signup/login. To fix in production:
+#   1. In the Resend dashboard, add and verify a domain you own (e.g. playpals.app).
+#   2. Set RESEND_FROM_EMAIL to an address on that domain, e.g.
+#      "PlayPals <hello@playpals.app>".
+# Until a domain is verified, this will keep failing for anyone but the
+# account owner - that's a Resend account action, not something fixable in code.
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "PlayPals <onboarding@resend.dev>")
+
+
 async def send_resend_email(to_email: str, subject: str, html: str) -> Dict[str, Any]:
     api_key = os.environ.get("RESEND_API_KEY")
     if not api_key:
@@ -306,7 +318,7 @@ async def send_resend_email(to_email: str, subject: str, html: str) -> Dict[str,
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={
-                "from": "PlayPals <onboarding@resend.dev>",
+                "from": RESEND_FROM_EMAIL,
                 "to": [to_email],
                 "subject": subject,
                 "html": html,

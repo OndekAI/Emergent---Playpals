@@ -119,6 +119,10 @@
     color: var(--stone);
 }
 
+.helper-text.error-text {
+    color: #C1523A;
+}
+
 .hero-illustration {
     height: 210px;
     border-radius: 28px;
