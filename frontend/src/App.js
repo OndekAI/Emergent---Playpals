@@ -130,11 +130,14 @@ function AuthCallback({ refresh }) {
   return <LoadingScreen />;
 }
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function LoginScreen() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [emailError, setEmailError] = useState("");
 
   const googleLogin = () => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
@@ -149,6 +152,8 @@ function LoginScreen() {
       return;
     }
     if (!email) return toast.error("Add your email first");
+    if (!EMAIL_RE.test(email)) { setEmailError("That doesn't look like a valid email address."); return; }
+    setEmailError("");
     setBusy(true);
     try {
       const result = await api("/auth/magic-link", {
@@ -186,7 +191,8 @@ function LoginScreen() {
           <UserRound size={17} /> Continue with Google
         </button>
         <div className="or-divider" data-testid="magic-link-divider"><span>or</span></div>
-        {emailOpen && <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="parent@email.com" data-testid="magic-email-input" autoFocus />}
+        {emailOpen && <input className="input" type="email" value={email} onChange={(e) => { setEmail(e.target.value); setEmailError(""); }} placeholder="parent@email.com" data-testid="magic-email-input" autoFocus />}
+        {emailError && <p className="helper-text error-text" data-testid="magic-email-error">{emailError}</p>}
         <button className="button secondary" disabled={busy} data-testid="magic-link-submit-button">
           <Mail size={17} /> {busy ? "Sending…" : emailOpen ? "Send magic link" : "Email magic link"}
         </button>
@@ -214,6 +220,7 @@ const navItems = [
   ["/home", "Home", Home, false],
   ["/playdates", "Playdates", CalendarDays, false],
   ["/community", "Community", Users, false],
+  ["/messages", "Messages", MessageCircle, true],
   ["/profile", "Profile", UserRound, false],
 ];
 
@@ -760,31 +767,55 @@ function StepBackSheet({ community, onClose, refreshAll }) {
 function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, onClose }) {
   const [detail, setDetail] = useState(null);
   const [proposal, setProposal] = useState(proposalMatch ? { match: proposalMatch } : null);
+  const [sponsorPromptId, setSponsorPromptId] = useState(null);
+  const [sponsorNameInput, setSponsorNameInput] = useState("");
   const load = useCallback(async () => {
     if (!communityId && proposalMatch) return;
     try { setDetail(await api(`/communities/${communityId}`)); } catch (error) { toast.error(error.message); }
   }, [communityId, proposalMatch]);
   useEffect(() => { load(); }, [load]);
+  const loading = !detail && !proposalMatch;
   const community = detail?.community || proposalMatch?.parent || {};
-  const join = async (id) => {
-    try { await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: id, teacher_name: "Ms. Smith", child_grade: "Grade 1" }) }); toast.success("Join request complete"); await load(); await refresh(); } catch (error) { toast.error(error.message); }
+  // Bug fix (UAT Aug 16 2026): this used to auto-submit a hardcoded fake sponsor
+  // ("Ms. Smith" / "Grade 1"), which silently bypassed the sponsor model and
+  // granted instant active membership. Now it asks the real user for a sponsor
+  // name first, matching the PRD's sponsor-vouching / 7-day-provisional rules.
+  const join = async (id, sponsorName) => {
+    try {
+      await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: id, sponsor_name: sponsorName || null }) });
+      toast.success(sponsorName ? "Sponsor request sent" : "Joined — provisional for 7 days until a member sponsors you");
+      setSponsorPromptId(null);
+      setSponsorNameInput("");
+      await load();
+      await refresh();
+    } catch (error) { toast.error(error.message); }
   };
   return (
     <div className="slide-screen" data-testid="community-drill-screen">
       <header className="top-header">
         <button className="icon-button" onClick={onClose} data-testid="drill-back-button"><ChevronLeft size={20} /></button>
-        <div className="screen-title">{community.name || "Community"}</div>
+        <div className="screen-title">{loading ? "Loading…" : community.name || "Community"}</div>
         <div />
       </header>
       <main className="main-content stack">
         <section className="card stack">
           <div className="row" style={{ gap: 12 }}>
             <div className="community-icon big"><MapPin size={20} /></div>
-            <div><h1 className="section-title">{community.name || "Playdate Match"}</h1><p className="muted">{community.city || "Trusted family"} · {community.member_count || ""} members</p></div>
+            <div><h1 className="section-title">{loading ? "Loading…" : community.name}</h1><p className="muted">{loading ? "" : `${community.city || ""} · ${community.member_count || 0} members`}</p></div>
           </div>
-          {detail?.membership ? <span className="badge sage">{detail.membership.status}</span> : communityId && <button className="button primary" onClick={() => join(communityId)}>Request to Join</button>}
+          {detail?.membership ? <span className="badge sage">{detail.membership.status}</span> : communityId && <button className="button primary" onClick={() => setSponsorPromptId(communityId)} data-testid="request-to-join-button">Request to Join</button>}
         </section>
-        {detail?.grades && <section className="stack"><h2 className="section-label">GRADE COMMUNITIES</h2>{detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name.replace("Mulgrave ", "")}</strong><p className="muted">{grade.member_count} members</p></div>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => join(grade.community_id)}>Join</button>}</div>)}</section>}
+        {sponsorPromptId && (
+          <section className="card stack" data-testid="sponsor-prompt-card">
+            <h2 className="section-label">WHO CAN VOUCH FOR YOU?</h2>
+            <p className="muted">Name a member you know so they can confirm you. Don't know anyone yet? You can still join provisionally for 7 days.</p>
+            <input className="input" value={sponsorNameInput} onChange={(e) => setSponsorNameInput(e.target.value)} placeholder="Sponsor's name" data-testid="drill-sponsor-name-input" />
+            <button className="button primary" onClick={() => join(sponsorPromptId, sponsorNameInput)} disabled={!sponsorNameInput} data-testid="drill-sponsor-submit-button">Send sponsor request</button>
+            <button className="button secondary" onClick={() => join(sponsorPromptId, null)} data-testid="drill-provisional-button">I don't know anyone — join provisionally</button>
+            <button className="button ghost" onClick={() => { setSponsorPromptId(null); setSponsorNameInput(""); }}>Cancel</button>
+          </section>
+        )}
+        {detail?.grades && <section className="stack"><h2 className="section-label">GRADE COMMUNITIES</h2>{detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name.replace("Mulgrave ", "")}</strong><p className="muted">{grade.member_count} members</p></div>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => setSponsorPromptId(grade.community_id)}>Join</button>}</div>)}</section>}
         {detail?.members?.length > 0 && <section className="stack"><h2 className="section-label">MEMBERS</h2>{detail.members.map((member) => <ParentRow key={member.user_id} parent={member} />)}</section>}
         {proposalMatch && <button className="button primary" onClick={() => setProposal({ match: proposalMatch })}>Propose Playdate →</button>}
       </main>
@@ -1226,6 +1257,7 @@ function AppRouter() {
       <Route path="/home" element={<Protected authed={authed} loading={loading}><HomePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/playdates" element={<Protected authed={authed} loading={loading}><PlaydatesPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/community" element={<Protected authed={authed} loading={loading}><CommunityPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/messages" element={<Protected authed={authed} loading={loading}><MessagesPlaceholder user={user} /></Protected>} />
       <Route path="/profile" element={<Protected authed={authed} loading={loading}><ProfilePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="*" element={<Navigate to={authed ? "/home" : "/login"} replace />} />
     </Routes>
