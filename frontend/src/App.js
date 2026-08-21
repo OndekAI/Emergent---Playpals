@@ -323,7 +323,7 @@ function HomePage({ user, dashboard, refresh }) {
         {!!sponsorRequests.length && (
           <section className="card stack" data-testid="sponsor-requests-card">
             <span className="badge blue" data-testid="sponsor-requests-badge">Sponsor requests</span>
-            {sponsorRequests.map((request) => <SponsorRequestCard key={request.membership_id} request={request} refresh={async () => { await refresh(); setSponsorRequests(await api("/sponsor-requests")); }} />)}
+            {sponsorRequests.map((request) => <SponsorRequestCard key={request.membership_id} request={request} onResponded={() => { setSponsorRequests((prev) => prev.filter((r) => r.membership_id !== request.membership_id)); refresh(); }} />)}
           </section>
         )}
 
@@ -364,7 +364,7 @@ function MatchCard({ match, onPropose, onDismiss }) {
     <article className={`match-card ${high ? "high" : "medium"}`} data-testid={`match-card-${match.match_id}`}>
       <div className="family-head">
         <div>
-          <h3 data-testid={`match-children-${match.match_id}`}>{childA.first_name || "Your child"} & {childB.first_name || "Friend"}</h3>
+          <h3 data-testid={`match-children-${match.match_id}`}>{childA.first_name || "Your child"} & {childB.first_name || "Friend"}</h3><p className="muted" data-testid={`match-demo-${match.match_id}`}>{match.parent?.user_id?.startsWith("sample_") ? "Demo family" : ""}</p>
           <p className="muted" data-testid={`match-meta-${match.match_id}`}>Ages {childA.age || "?"} & {childB.age || "?"} · {ageGap}yr apart · {match.parent?.name}</p>
         </div>
         <span className={`score-badge ${high ? "sage" : "amber"}`} data-testid={`match-score-${match.match_id}`}>{match.score || 80}% · {match.score_label || "Great match"}</span>
@@ -382,12 +382,12 @@ function MatchCard({ match, onPropose, onDismiss }) {
   );
 }
 
-function SponsorRequestCard({ request, refresh }) {
+function SponsorRequestCard({ request, onResponded }) {
   const respond = async (action) => {
     try {
       await api(`/sponsor-requests/${request.membership_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
       toast.success(action === "approve" ? "Sponsor approved" : "Sponsor declined");
-      await refresh();
+      onResponded();
     } catch (error) { toast.error(error.message); }
   };
   return (
