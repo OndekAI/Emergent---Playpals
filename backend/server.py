@@ -1267,7 +1267,7 @@ if "*" in cors_origins:
         "https://pals-availability.preview.emergentagent.com",
         "https://c959650a-19c2-4536-8433-f2d6f78d1686.preview.emergentagent.com",
     ]
-    cors_kwargs["allow_origin_regex"] = r"https://.*\.(preview\.emergentagent\.com|vercel\.app)"
+    cors_kwargs["allow_origin_regex"] = r"https://(.*\.)?(preview\.emergentagent\.com|vercel\.app|playpals\.ondek\.co)$"
 else:
     cors_kwargs["allow_origins"] = cors_origins
 app.add_middleware(CORSMiddleware, **cors_kwargs)
