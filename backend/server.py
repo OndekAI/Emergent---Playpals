@@ -501,7 +501,7 @@ def is_admin_email(email: str) -> bool:
     
 async def require_admin(user: Dict[str, Any] = Depends(current_user)) -> Dict[str, Any]:
     if not is_admin_email(user.get("email", "")):
-    raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
 async def notify_parent(parent_id: str, title: str, body: str, kind: str, reference_id: str = "") -> None:
@@ -645,7 +645,7 @@ async def oauth_session(payload: OAuthSessionRequest, response: Response):
 
 async def enrich_user(user: Dict[str, Any]) -> Dict[str, Any]:
     total = await credit_total(user["user_id"])
-        enriched = {
+    enriched = {
         **user,
         "credits": total,
         "tier": tier_for_credits(total),
