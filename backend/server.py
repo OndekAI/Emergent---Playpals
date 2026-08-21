@@ -115,6 +115,7 @@ class JoinCommunityRequest(BaseModel):
     sponsor_name: Optional[str] = None
     teacher_name: Optional[str] = None
     child_grade: Optional[str] = None
+    via_link: bool = False
 
 
 class PlaydateCreate(BaseModel):
@@ -820,7 +821,12 @@ async def remove_availability(date_value: str, user: Dict[str, Any] = Depends(cu
     return {"ok": True}
 
 
-@api_router.get("/communities")
+@api_router.get("/communities/by-slug/{slug}")
+async def get_community_by_slug(slug: str, user: Dict[str, Any] = Depends(current_user)):
+    community = await db.communities.find_one({"join_slug": slug, "status": "active"}, {"_id": 0})
+    if not community:
+        raise HTTPException(status_code=404, detail="Invalid or expired join link")
+    return {"community": community}
 async def list_communities(user: Dict[str, Any] = Depends(current_user)):
     communities = await db.communities.find({"status": "active"}, {"_id": 0}).sort("name", 1).to_list(200)
     memberships = await db.community_members.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(200)
@@ -931,12 +937,18 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
     community = await db.communities.find_one({"community_id": payload.community_id}, {"_id": 0})
     if not community:
         raise HTTPException(status_code=404, detail="Community not found")
-    existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
+       existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
     if existing:
         return {"membership": existing, "community": community}
     status = "provisional"
     sponsor_id = None
-    if payload.sponsor_name:
+    if payload.via_link:
+        status = "active"
+        if payload.sponsor_name:
+            sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
+            if sponsor:
+                sponsor_id = sponsor["user_id"]
+    elif payload.sponsor_name:
         sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
         if sponsor:
             sponsor_id = sponsor["user_id"]
