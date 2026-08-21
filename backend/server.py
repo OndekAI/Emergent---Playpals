@@ -890,6 +890,7 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
         **payload.model_dump(),
         "created_by": user["user_id"],
         "status": "active",
+        "join_slug": secrets.token_urlsafe(6),
         "created_at": now_iso(),
     }
     await db.communities.insert_one(community.copy())
