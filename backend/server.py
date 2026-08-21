@@ -937,7 +937,7 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
     community = await db.communities.find_one({"community_id": payload.community_id}, {"_id": 0})
     if not community:
         raise HTTPException(status_code=404, detail="Community not found")
-       existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
+    existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
     if existing:
         return {"membership": existing, "community": community}
     status = "provisional"
