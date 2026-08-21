@@ -173,9 +173,6 @@ function LoginScreen() {
   return (
     <main className="app-shell login-screen" data-testid="login-screen">
       <section className="login-top-section" data-testid="login-top-section">
-        <div className="phone-status-bar" data-testid="login-status-bar">
-          <span>9:43</span><span>⌁ ◔ ▰</span>
-        </div>
         <div className="brand-row" data-testid="login-brand-row">
           <LogoMark />
           <div className="brand-name" data-testid="login-brand-name">PlayPals</div>
