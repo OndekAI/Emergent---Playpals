@@ -885,18 +885,45 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
     duplicate = await check_community_duplicate(CommunityCheckRequest(name=payload.name, city=payload.city, type=payload.type), user)
     if duplicate["result"] == "duplicate":
         return {"created": False, "duplicate": duplicate["matches"][0]["community"]}
+    is_admin = is_admin_email(user.get("email", ""))
     community = {
         "community_id": new_id("comm"),
         **payload.model_dump(),
         "created_by": user["user_id"],
-        "status": "active",
+        "status": "active" if is_admin else "pending_approval",
         "join_slug": secrets.token_urlsafe(6),
         "created_at": now_iso(),
     }
     await db.communities.insert_one(community.copy())
-    await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if payload.type in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
-    await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
+    if is_admin:
+        await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if payload.type in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
+        await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
     return {"created": True, "community": community, "duplicate_check": duplicate}
+
+
+@api_router.post("/communities/{community_id}/approve")
+async def approve_community(community_id: str, admin: Dict[str, Any] = Depends(require_admin)):
+    community = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    if not community:
+        raise HTTPException(status_code=404, detail="Community not found")
+    if community["status"] == "active":
+        return {"approved": True, "community": community}
+    await db.communities.update_one({"community_id": community_id}, {"$set": {"status": "active"}})
+    creator_id = community.get("created_by")
+    if creator_id:
+        existing_membership = await db.community_members.find_one({"community_id": community_id, "parent_id": creator_id}, {"_id": 0})
+        if not existing_membership:
+            await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community_id, "parent_id": creator_id, "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
+            await add_credit(creator_id, 5, "community_creator", community_id)
+        await notify_parent(creator_id, "Community approved", f"{community['name']} is now live!", "community", community_id)
+    updated = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    return {"approved": True, "community": updated}
+
+
+@api_router.get("/admin/communities/pending")
+async def list_pending_communities(admin: Dict[str, Any] = Depends(require_admin)):
+    pending = await db.communities.find({"status": "pending_approval"}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return {"communities": pending}
 
 
 @api_router.post("/communities/join")
