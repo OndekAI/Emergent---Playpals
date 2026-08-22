@@ -7,6 +7,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useParams,
 } from "react-router-dom";
 import {
   Baby,
@@ -116,9 +117,12 @@ function AuthCallback({ refresh }) {
       try {
         if (sessionId) await api("/auth/oauth/session", { method: "POST", body: JSON.stringify({ session_id: sessionId }) });
         if (magicToken) await api("/auth/magic/verify", { method: "POST", body: JSON.stringify({ token: magicToken }) });
-        window.history.replaceState({}, "", "/home");
         await refresh();
-        navigate("/home", { replace: true });
+        const pendingSlug = localStorage.getItem("pendingJoinSlug");
+        const dest = pendingSlug ? `/join/${pendingSlug}` : "/home";
+        if (pendingSlug) localStorage.removeItem("pendingJoinSlug");
+        window.history.replaceState({}, "", dest);
+        navigate(dest, { replace: true });
       } catch (error) {
         toast.error(error.message);
         navigate("/login", { replace: true });
@@ -254,6 +258,16 @@ function AppLayout({ title, user, children }) {
 function Protected({ authed, loading, children }) {
   if (loading) return <LoadingScreen />;
   if (!authed) return <Navigate to="/login" replace />;
+  return children;
+}
+
+function JoinLinkGate({ authed, loading, children }) {
+  const { slug } = useParams();
+  if (loading) return <LoadingScreen />;
+  if (!authed) {
+    localStorage.setItem("pendingJoinSlug", slug);
+    return <Navigate to="/login" replace />;
+  }
   return children;
 }
 
@@ -897,6 +911,66 @@ function JoinCommunityModal({ communities, onClose, refreshAll }) {
   );
 }
 
+function JoinViaLinkScreen({ user, refresh }) {
+  const { slug } = useParams();
+  const navigate = useNavigate();
+  const [community, setCommunity] = useState(null);
+  const [error, setError] = useState("");
+  const [joining, setJoining] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setCommunity(null);
+    setError("");
+    api(`/communities/by-slug/${slug}`)
+      .then((data) => { if (active) setCommunity(data.community); })
+      .catch((err) => { if (active) setError(err.message); });
+    return () => { active = false; };
+  }, [slug]);
+
+  const join = async () => {
+    setJoining(true);
+    try {
+      await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: community.community_id, via_link: true }) });
+      toast.success(`Joined ${community.name}`);
+      await refresh();
+      navigate("/home", { replace: true });
+    } catch (err) {
+      toast.error(err.message);
+      setJoining(false);
+    }
+  };
+
+  return (
+    <div className="slide-screen" data-testid="join-link-screen">
+      <Header title="Join community" user={user} />
+      <main className="main-content stack">
+        {error ? (
+          <div className="empty-state card" data-testid="join-link-error">{error}</div>
+        ) : !community ? (
+          <div className="stack" style={{ alignItems: "center" }}>
+            <div className="spinner" data-testid="join-link-spinner" />
+            <p className="muted">Looking up your invite…</p>
+          </div>
+        ) : (
+          <section className="card stack" data-testid="join-link-card">
+            <div className="row" style={{ gap: 12 }}>
+              <div className="community-icon big"><MapPin size={20} /></div>
+              <div>
+                <h1 className="section-title" data-testid="join-link-name">{community.name}</h1>
+                <p className="muted">{[community.city, community.member_count ? `${community.member_count} members` : null].filter(Boolean).join(" · ")}</p>
+              </div>
+            </div>
+            <button className="button primary" onClick={join} disabled={joining} data-testid="join-link-submit-button">
+              {joining ? "Joining…" : `Join ${community.name}`}
+            </button>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
 function PlaydateCard({ playdate, user, refresh }) {
   const [showChat, setShowChat] = useState(false);
   const [showComplete, setShowComplete] = useState(false);
@@ -1254,6 +1328,7 @@ function AppRouter() {
       <Route path="/home" element={<Protected authed={authed} loading={loading}><HomePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/playdates" element={<Protected authed={authed} loading={loading}><PlaydatesPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/community" element={<Protected authed={authed} loading={loading}><CommunityPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/join/:slug" element={<JoinLinkGate authed={authed} loading={loading}><JoinViaLinkScreen user={user} refresh={refresh} /></JoinLinkGate>} />
       <Route path="/messages" element={<Protected authed={authed} loading={loading}><MessagesPlaceholder user={user} /></Protected>} />
       <Route path="/profile" element={<Protected authed={authed} loading={loading}><ProfilePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="*" element={<Navigate to={authed ? "/home" : "/login"} replace />} />
