@@ -830,7 +830,7 @@ async def get_community_by_slug(slug: str, user: Dict[str, Any] = Depends(curren
     community = await db.communities.find_one({"join_slug": slug, "status": "active"}, {"_id": 0})
     if not community:
         raise HTTPException(status_code=404, detail="Invalid or expired join link")
-        return {"community": community}
+    return {"community": community}
 
 
 @api_router.get("/communities")
