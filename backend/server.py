@@ -848,15 +848,10 @@ async def community_detail(community_id: str, user: Dict[str, Any] = Depends(cur
         raise HTTPException(status_code=404, detail="Community not found")
     membership = await db.community_members.find_one({"community_id": community_id, "parent_id": user["user_id"]}, {"_id": 0})
     master_id = community_id if not community.get("master_community_id") else community["master_community_id"]
-    grade_rows = []
-    for grade in GRADES:
-        grade_id = f"comm_mulgrave_{grade.lower().replace(' ', '_').replace('-', '')}" if master_id == "comm_mulgrave" else None
-        row = await db.communities.find_one({"community_id": grade_id}, {"_id": 0}) if grade_id else None
-        if not row:
-            row = {"community_id": f"grade_{grade.lower().replace(' ', '_')}", "name": grade, "type": "grade", "city": community.get("city", ""), "master_community_id": master_id, "status": "active"}
-        row["member_count"] = await db.community_members.count_documents({"community_id": row["community_id"], "status": {"$in": ["active", "provisional", "pending_sponsor"]}})
+    grade_rows = await db.communities.find({"master_community_id": master_id, "type": "grade", "status": "active"}, {"_id": 0}).sort("name", 1).to_list(20)
+    for row in grade_rows:
+        row["member_count"] = await db.community_members.count_documents({"community_id": row["community_id"], "status": "active"})
         row["membership"] = await db.community_members.find_one({"community_id": row["community_id"], "parent_id": user["user_id"]}, {"_id": 0})
-        grade_rows.append(row)
     other_rows = await db.communities.find({"master_community_id": master_id, "type": {"$nin": ["grade", "school"]}}, {"_id": 0}).to_list(100)
     members = []
     if membership and membership.get("status") == "active":
@@ -896,15 +891,29 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
     if duplicate["result"] == "duplicate":
         return {"created": False, "duplicate": duplicate["matches"][0]["community"]}
     is_admin = is_admin_email(user.get("email", ""))
+    status = "active" if is_admin else "pending_approval"
     community = {
         "community_id": new_id("comm"),
         **payload.model_dump(),
         "created_by": user["user_id"],
-        "status": "active" if is_admin else "pending_approval",
+        "status": status,
         "join_slug": secrets.token_urlsafe(6),
         "created_at": now_iso(),
     }
     await db.communities.insert_one(community.copy())
+    if payload.type == "school":
+        for grade in GRADES:
+            await db.communities.insert_one({
+                "community_id": new_id("comm"),
+                "name": f"{payload.name} {grade}",
+                "type": "grade",
+                "city": payload.city,
+                "master_community_id": community["community_id"],
+                "created_by": user["user_id"],
+                "status": status,
+                "join_slug": secrets.token_urlsafe(6),
+                "created_at": now_iso(),
+            })
     if is_admin:
         await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if payload.type in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
         await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
@@ -919,6 +928,7 @@ async def approve_community(community_id: str, admin: Dict[str, Any] = Depends(r
     if community["status"] == "active":
         return {"approved": True, "community": community}
     await db.communities.update_one({"community_id": community_id}, {"$set": {"status": "active"}})
+    await db.communities.update_many({"master_community_id": community_id, "status": "pending_approval"}, {"$set": {"status": "active"}})
     creator_id = community.get("created_by")
     if creator_id:
         existing_membership = await db.community_members.find_one({"community_id": community_id, "parent_id": creator_id}, {"_id": 0})
