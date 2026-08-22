@@ -1260,12 +1260,78 @@ function ProfilePage({ user, dashboard, refresh }) {
           {!dashboard?.children?.length && <div className="empty-state card" data-testid="children-empty-state">Add a child profile to unlock scheduling.</div>}
         </section>
         <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email {user?.notification_preferences?.email ? "on" : "off"}</span><span className="badge blue">Push {user?.notification_preferences?.push ? "on" : "off"}</span><span className="badge amber">SMS {user?.notification_preferences?.sms ? "on" : "off"}</span></div></section>
+        {user?.is_admin && <AdminPendingCommunities />}
         <button className="button secondary" onClick={logout} data-testid="logout-button">Log out</button>
       </div>
       {showChild && <ChildModal onClose={() => setShowChild(false)} refresh={refresh} />}
       {editingChild && <ChildModal child={editingChild} onClose={() => setEditingChild(null)} refresh={refresh} />}
       {showParentEdit && <ParentProfileModal user={user} refresh={refresh} onClose={() => setShowParentEdit(false)} />}
     </AppLayout>
+  );
+}
+
+function AdminPendingCommunities() {
+  const [pending, setPending] = useState([]);
+  const [approvedLinks, setApprovedLinks] = useState({});
+  const [copiedId, setCopiedId] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadPending = useCallback(() => {
+    setLoading(true);
+    api("/admin/communities/pending")
+      .then((data) => setPending(data.communities || []))
+      .catch(() => setPending([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { loadPending(); }, [loadPending]);
+
+  const approve = async (communityId) => {
+    try {
+      const data = await api(`/communities/${communityId}/approve`, { method: "POST" });
+      toast.success(`${data.community.name} approved`);
+      setApprovedLinks((prev) => ({ ...prev, [communityId]: data.community.join_slug }));
+      setPending((prev) => prev.filter((c) => c.community_id !== communityId));
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const copyLink = (communityId, slug) => {
+    const link = `${window.location.origin}/join/${slug}`;
+    navigator.clipboard.writeText(link);
+    setCopiedId(communityId);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  if (loading || (!pending.length && !Object.keys(approvedLinks).length)) return null;
+
+  return (
+    <section className="card stack" data-testid="admin-pending-communities-card">
+      <h2 className="card-title" data-testid="admin-pending-title">Pending communities</h2>
+      {pending.map((community) => (
+        <div className="mini-card" key={community.community_id} data-testid={`admin-pending-${community.community_id}`}>
+          <div>
+            <strong data-testid={`admin-pending-name-${community.community_id}`}>{community.name}</strong>
+            <p className="muted">{community.city || ""}</p>
+          </div>
+          <button className="button small primary" onClick={() => approve(community.community_id)} data-testid={`admin-approve-button-${community.community_id}`}>
+            Approve
+          </button>
+        </div>
+      ))}
+      {Object.entries(approvedLinks).map(([communityId, slug]) => (
+        <div className="mini-card" key={communityId} data-testid={`admin-approved-${communityId}`}>
+          <div>
+            <strong>Join link ready</strong>
+            <p className="muted" data-testid={`admin-approved-link-${communityId}`}>{`${window.location.origin}/join/${slug}`}</p>
+          </div>
+          <button className="button small secondary" onClick={() => copyLink(communityId, slug)} data-testid={`admin-copy-button-${communityId}`}>
+            {copiedId === communityId ? <><Check size={15} /> Copied</> : "Copy"}
+          </button>
+        </div>
+      ))}
+    </section>
   );
 }
 
