@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://playpals-production-393e.up.railway.app/api/:path*"
+    }
+  ]
+}
