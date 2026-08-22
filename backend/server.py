@@ -118,6 +118,10 @@ class JoinCommunityRequest(BaseModel):
     via_link: bool = False
 
 
+class TagSponsorRequest(BaseModel):
+    sponsor_id: str
+
+
 class PlaydateCreate(BaseModel):
     type: str = "1:1"
     invitee_parent_ids: List[str]
@@ -962,6 +966,26 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         await notify_parent(sponsor_id, "Sponsor request", f"{user['name']} wants to join {community['name']}. Do you know them?", "sponsor", membership["membership_id"])
     await notify_parent(user["user_id"], "Community joined", f"You're now {status} in {community['name']}.", "community", payload.community_id)
     return {"membership": membership, "community": community}
+
+
+@api_router.post("/communities/{community_id}/tag-sponsor")
+async def tag_sponsor(community_id: str, payload: TagSponsorRequest, user: Dict[str, Any] = Depends(current_user)):
+    membership = await db.community_members.find_one({"community_id": community_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not membership:
+        raise HTTPException(status_code=404, detail="You are not a member of this community")
+    sponsor = await db.users.find_one({"user_id": payload.sponsor_id}, {"_id": 0})
+    if not sponsor:
+        raise HTTPException(status_code=404, detail="Sponsor not found")
+    sponsor_membership = await db.community_members.find_one({"community_id": community_id, "parent_id": payload.sponsor_id}, {"_id": 0})
+    if not sponsor_membership:
+        raise HTTPException(status_code=400, detail="Sponsor is not a member of this community")
+    await db.community_members.update_one({"community_id": community_id, "parent_id": user["user_id"]}, {"$set": {"sponsor_id": payload.sponsor_id}})
+    community = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    community_name = community["name"] if community else "your community"
+    await notify_parent(payload.sponsor_id, "Someone knows you!", f"{user['name']} said they know you in {community_name}.", "sponsor_tag", community_id)
+    await add_credit(payload.sponsor_id, 2, "sponsored_join", community_id)
+    await add_credit(user["user_id"], 1, "tagged_sponsor", community_id)
+    return {"tagged": True}
 
 
 @api_router.post("/communities/{community_id}/step-back")
