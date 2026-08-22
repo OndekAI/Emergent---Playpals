@@ -917,6 +917,10 @@ function JoinViaLinkScreen({ user, refresh }) {
   const [community, setCommunity] = useState(null);
   const [error, setError] = useState("");
   const [joining, setJoining] = useState(false);
+  const [joined, setJoined] = useState(false);
+  const [members, setMembers] = useState([]);
+  const [sponsorQuery, setSponsorQuery] = useState("");
+  const [taggedId, setTaggedId] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -934,12 +938,31 @@ function JoinViaLinkScreen({ user, refresh }) {
       await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: community.community_id, via_link: true }) });
       toast.success(`Joined ${community.name}`);
       await refresh();
-      navigate("/home", { replace: true });
+      const detail = await api(`/communities/${community.community_id}`);
+      setMembers(detail.members || []);
+      setJoined(true);
     } catch (err) {
       toast.error(err.message);
+    } finally {
       setJoining(false);
     }
   };
+
+  const tagSponsor = async (memberId) => {
+    try {
+      await api(`/communities/${community.community_id}/tag-sponsor`, { method: "POST", body: JSON.stringify({ sponsor_id: memberId }) });
+      setTaggedId(memberId);
+      toast.success("Thanks for letting them know!");
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const finish = () => navigate("/home", { replace: true });
+
+  const filteredMembers = sponsorQuery.trim()
+    ? members.filter((m) => m.user_id !== user.user_id && m.name?.toLowerCase().includes(sponsorQuery.trim().toLowerCase()))
+    : [];
 
   return (
     <div className="slide-screen" data-testid="join-link-screen">
@@ -952,6 +975,37 @@ function JoinViaLinkScreen({ user, refresh }) {
             <div className="spinner" data-testid="join-link-spinner" />
             <p className="muted">Looking up your invite…</p>
           </div>
+        ) : joined ? (
+          <section className="card stack" data-testid="join-link-sponsor-card">
+            <h1 className="section-title">You're in! 🎉</h1>
+            <p className="muted">Know someone in {community.name}? (optional)</p>
+            <input
+              className="input"
+              type="text"
+              placeholder="Search by name"
+              value={sponsorQuery}
+              onChange={(e) => setSponsorQuery(e.target.value)}
+              data-testid="join-link-sponsor-search"
+            />
+            {filteredMembers.length > 0 && (
+              <div className="stack" data-testid="join-link-sponsor-results">
+                {filteredMembers.map((m) => (
+                  <button
+                    key={m.user_id}
+                    className="button secondary"
+                    onClick={() => tagSponsor(m.user_id)}
+                    disabled={taggedId === m.user_id}
+                    data-testid={`join-link-sponsor-option-${m.user_id}`}
+                  >
+                    {taggedId === m.user_id ? `✓ ${m.name}` : m.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button className="button primary" onClick={finish} data-testid="join-link-continue-button">
+              Continue
+            </button>
+          </section>
         ) : (
           <section className="card stack" data-testid="join-link-card">
             <div className="row" style={{ gap: 12 }}>
