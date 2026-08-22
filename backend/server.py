@@ -1363,7 +1363,7 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_seed():
-    await ensure_global_seed()
+    pass  # Demo seed data disabled for production testing
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
