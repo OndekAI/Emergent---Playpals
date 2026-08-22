@@ -906,7 +906,7 @@ async def add_sub_community(community_id: str, payload: AddSubCommunityRequest, 
         "join_slug": secrets.token_urlsafe(6),
         "created_at": now_iso(),
     }
-    await db.communities.insert_one(sub)
+    await db.communities.insert_one(sub.copy())
     return {"created": True, "community": sub}
 
 
