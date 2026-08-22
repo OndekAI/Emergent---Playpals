@@ -708,6 +708,8 @@ function CommunityPage({ user, dashboard, refresh }) {
   const [communities, setCommunities] = useState([]);
   const [showCreate, setShowCreate] = useState(false);
   const [drill, setDrill] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
   const location = useLocation();
 
   const load = useCallback(async () => {
@@ -721,9 +723,19 @@ function CommunityPage({ user, dashboard, refresh }) {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (location.state?.match) setDrill({ proposalMatch: location.state.match }); }, [location.state]);
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) { setSearchResults([]); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const results = await api(`/communities/search?q=${encodeURIComponent(q)}`);
+        setSearchResults(results);
+      } catch (error) { toast.error(error.message); }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const myCommunities = communities.filter((community) => community.membership);
-  const masters = communities.filter((community) => !community.master_community_id);
 
   return (
     <AppLayout title="Community" user={user}>
@@ -734,9 +746,18 @@ function CommunityPage({ user, dashboard, refresh }) {
           {!myCommunities.length && <div className="empty-state card">No communities joined yet.</div>}
         </section>
         <section className="stack" data-testid="discover-communities-section">
-          <h2 className="section-label" data-testid="discover-title">DISCOVER COMMUNITIES</h2>
-          <div className="search-bar"><Search size={18} /><input placeholder="Search by school or neighbourhood" data-testid="community-search-input" /></div>
-          {masters.map((community) => <CommunityDirectoryCard key={community.community_id} community={community} onOpen={() => setDrill({ communityId: community.community_id })} />)}
+          <h2 className="section-label" data-testid="discover-title">FIND YOUR GROUPS</h2>
+          <div className="search-bar">
+            <Search size={18} />
+            <input
+              placeholder="Search by grade, class, or group"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              data-testid="community-search-input"
+            />
+          </div>
+          {searchQuery.trim().length < 2 && <div className="empty-state card">Type to search grades and groups in your schools.</div>}
+          {searchResults.map((community) => <CommunityDirectoryCard key={community.community_id} community={community} onOpen={() => setDrill({ communityId: community.community_id })} />)}
         </section>
       </div>
       {showCreate && <CreateCommunityModal onClose={() => setShowCreate(false)} refreshAll={async () => { await refresh(); await load(); }} />}

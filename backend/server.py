@@ -837,13 +837,37 @@ async def get_community_by_slug(slug: str, user: Dict[str, Any] = Depends(curren
 
 @api_router.get("/communities")
 async def list_communities(user: Dict[str, Any] = Depends(current_user)):
-    communities = await db.communities.find({"status": "active"}, {"_id": 0}).sort("name", 1).to_list(200)
     memberships = await db.community_members.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(200)
     member_map = {member["community_id"]: member for member in memberships}
+    community_ids = list(member_map.keys())
+    communities = await db.communities.find({"community_id": {"$in": community_ids}, "status": "active"}, {"_id": 0}).sort("name", 1).to_list(200) if community_ids else []
     for community in communities:
         community["member_count"] = await db.community_members.count_documents({"community_id": community["community_id"], "status": {"$in": ["active", "provisional", "pending_sponsor", "alumni", "on_a_break", "moved_on", "graduate"]}})
         community["membership"] = member_map.get(community["community_id"])
     return communities
+
+
+@api_router.get("/communities/search")
+async def search_communities(q: str = "", user: Dict[str, Any] = Depends(current_user)):
+    q = q.strip()
+    if len(q) < 2:
+        return []
+    memberships = await db.community_members.find({"parent_id": user["user_id"]}, {"_id": 0}).to_list(200)
+    joined_ids = [m["community_id"] for m in memberships]
+    if not joined_ids:
+        return []
+    joined_masters = await db.communities.find({"community_id": {"$in": joined_ids}}, {"_id": 0}).to_list(200)
+    master_ids = [c["community_id"] for c in joined_masters if not c.get("master_community_id")] + [c.get("master_community_id") for c in joined_masters if c.get("master_community_id")]
+    master_ids = list(set(master_ids))
+    if not master_ids:
+        return []
+    results = await db.communities.find(
+        {"master_community_id": {"$in": master_ids}, "status": "active", "name": {"$regex": re.escape(q), "$options": "i"}},
+        {"_id": 0, "community_id": 1, "name": 1, "city": 1, "master_community_id": 1}
+    ).limit(20).to_list(20)
+    for r in results:
+        r["member_count"] = await db.community_members.count_documents({"community_id": r["community_id"], "status": {"$in": ["active", "provisional", "pending_sponsor", "alumni", "on_a_break", "moved_on", "graduate"]}})
+    return results
 
 
 @api_router.get("/communities/{community_id}")
