@@ -115,6 +115,11 @@ class JoinCommunityRequest(BaseModel):
     class_or_teacher: Optional[str] = None
 
 
+class AddSubCommunityRequest(BaseModel):
+    name: str
+    type: str = "grade"
+
+
 class TagSponsorRequest(BaseModel):
     sponsor_id: str
 
@@ -883,6 +888,26 @@ async def check_community_duplicate(payload: CommunityCheckRequest, user: Dict[s
     elif scored:
         result = "similar"
     return {"result": result, "matches": scored[:5]}
+
+
+@api_router.post("/communities/{community_id}/add-sub")
+async def add_sub_community(community_id: str, payload: AddSubCommunityRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    parent = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    if not parent:
+        raise HTTPException(status_code=404, detail="Community not found")
+    sub = {
+        "community_id": new_id("comm"),
+        "name": payload.name,
+        "type": payload.type,
+        "city": parent.get("city", ""),
+        "master_community_id": community_id,
+        "created_by": admin["user_id"],
+        "status": "active",
+        "join_slug": secrets.token_urlsafe(6),
+        "created_at": now_iso(),
+    }
+    await db.communities.insert_one(sub)
+    return {"created": True, "community": sub}
 
 
 @api_router.post("/communities")

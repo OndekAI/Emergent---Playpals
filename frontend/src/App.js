@@ -740,7 +740,7 @@ function CommunityPage({ user, dashboard, refresh }) {
         </section>
       </div>
       {showCreate && <CreateCommunityModal onClose={() => setShowCreate(false)} refreshAll={async () => { await refresh(); await load(); }} />}
-      {drill && <CommunityDrillDown {...drill} dashboard={dashboard} refresh={refresh} onClose={() => { setDrill(null); load(); }} />}
+      {drill && <CommunityDrillDown {...drill} dashboard={dashboard} refresh={refresh} user={user} onClose={() => { setDrill(null); load(); }} />}
     </AppLayout>
   );
 }
@@ -775,11 +775,12 @@ function StepBackSheet({ community, onClose, refreshAll }) {
   return <div className="sheet-overlay" data-testid="step-back-sheet"><section className="bottom-sheet"><div className="drag-handle" /><div className="sheet-title-row"><h3>Step back from {community.name}?</h3><button className="icon-button" onClick={onClose}><X size={18} /></button></div><div className="stack"><button className={`radio-card ${reason === "moved_schools" ? "active" : ""}`} onClick={() => setReason("moved_schools")}><strong>This child has moved schools</strong><span>We'll help you find their new school community</span></button><button className={`radio-card ${reason === "taking_break" ? "active" : ""}`} onClick={() => setReason("taking_break")}><strong>Taking a break</strong><span>Pause and auto-reactivate later</span></button>{reason === "taking_break" && <div className="chip-row">{[["2_weeks", "2 weeks"], ["1_month", "1 month"], ["3_months", "3 months"]].map(([value, label]) => <button key={value} className={`chip ${duration === value ? "active" : ""}`} onClick={() => setDuration(value)}>{label}</button>)}</div>}<button className={`radio-card ${reason === "other" ? "active" : ""}`} onClick={() => setReason("other")}><strong>Other reason</strong><span>Keeps history and marks as alumni</span></button><button className="button primary" onClick={confirm}>Confirm</button></div></section></div>;
 }
 
-function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, onClose }) {
+function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, onClose, user }) {
   const [detail, setDetail] = useState(null);
   const [proposal, setProposal] = useState(proposalMatch ? { match: proposalMatch } : null);
-  const [sponsorPromptId, setSponsorPromptId] = useState(null);
-  const [sponsorNameInput, setSponsorNameInput] = useState("");
+  const [copiedId, setCopiedId] = useState(null);
+  const [addingGrade, setAddingGrade] = useState(false);
+  const [newGradeName, setNewGradeName] = useState("");
   const load = useCallback(async () => {
     if (!communityId && proposalMatch) return;
     try { setDetail(await api(`/communities/${communityId}`)); } catch (error) { toast.error(error.message); }
@@ -787,18 +788,27 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
   useEffect(() => { load(); }, [load]);
   const loading = !detail && !proposalMatch;
   const community = detail?.community || proposalMatch?.parent || {};
-  // Bug fix (UAT Aug 16 2026): this used to auto-submit a hardcoded fake sponsor
-  // ("Ms. Smith" / "Grade 1"), which silently bypassed the sponsor model and
-  // granted instant active membership. Now it asks the real user for a sponsor
-  // name first, matching the PRD's sponsor-vouching / 7-day-provisional rules.
-  const join = async (id, sponsorName) => {
+  const join = async (id) => {
     try {
-      await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: id, sponsor_name: sponsorName || null }) });
-      toast.success(sponsorName ? "Sponsor request sent" : "Joined — provisional for 7 days until a member sponsors you");
-      setSponsorPromptId(null);
-      setSponsorNameInput("");
+      const result = await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: id }) });
+      toast.success(result.already_member ? "You're already a member" : "Joined!");
       await load();
       await refresh();
+    } catch (error) { toast.error(error.message); }
+  };
+  const copyLink = (id, slug) => {
+    navigator.clipboard.writeText(`${window.location.origin}/join/${slug}`);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+  const addGrade = async () => {
+    if (!newGradeName.trim()) return;
+    try {
+      await api(`/communities/${communityId}/add-sub`, { method: "POST", body: JSON.stringify({ name: newGradeName.trim() }) });
+      toast.success(`${newGradeName.trim()} added`);
+      setAddingGrade(false);
+      setNewGradeName("");
+      await load();
     } catch (error) { toast.error(error.message); }
   };
   return (
@@ -814,19 +824,32 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
             <div className="community-icon big"><MapPin size={20} /></div>
             <div><h1 className="section-title">{loading ? "Loading…" : community.name}</h1><p className="muted">{loading ? "" : `${community.city || ""} · ${community.member_count || 0} members`}</p></div>
           </div>
-          {detail?.membership ? <span className="badge sage">{detail.membership.status}</span> : communityId && <button className="button primary" onClick={() => setSponsorPromptId(communityId)} data-testid="request-to-join-button">Request to Join</button>}
+          {detail?.membership ? <span className="badge sage">Active</span> : communityId && <button className="button primary" onClick={() => join(communityId)} data-testid="request-to-join-button">Join</button>}
+          {user?.is_admin && community.join_slug && (
+            <button className="button small secondary" onClick={() => copyLink(community.community_id, community.join_slug)} data-testid="copy-community-link-button">
+              {copiedId === community.community_id ? <><Check size={15} /> Copied</> : "Copy join link"}
+            </button>
+          )}
         </section>
-        {sponsorPromptId && (
-          <section className="card stack" data-testid="sponsor-prompt-card">
-            <h2 className="section-label">WHO CAN VOUCH FOR YOU?</h2>
-            <p className="muted">Name a member you know so they can confirm you. Don't know anyone yet? You can still join provisionally for 7 days.</p>
-            <input className="input" value={sponsorNameInput} onChange={(e) => setSponsorNameInput(e.target.value)} placeholder="Sponsor's name" data-testid="drill-sponsor-name-input" />
-            <button className="button primary" onClick={() => join(sponsorPromptId, sponsorNameInput)} disabled={!sponsorNameInput} data-testid="drill-sponsor-submit-button">Send sponsor request</button>
-            <button className="button secondary" onClick={() => join(sponsorPromptId, null)} data-testid="drill-provisional-button">I don't know anyone — join provisionally</button>
-            <button className="button ghost" onClick={() => { setSponsorPromptId(null); setSponsorNameInput(""); }}>Cancel</button>
+        {detail?.grades && (
+          <section className="stack">
+            <h2 className="section-label">GRADE COMMUNITIES</h2>
+            {detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name}</strong><p className="muted">{grade.member_count} members</p></div><div className="row" style={{ gap: 8 }}>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => join(grade.community_id)}>Join</button>}{user?.is_admin && grade.join_slug && <button className="button small secondary" onClick={() => copyLink(grade.community_id, grade.join_slug)}>{copiedId === grade.community_id ? <><Check size={15} /> Copied</> : "Copy link"}</button>}</div></div>)}
+            {user?.is_admin && (
+              addingGrade ? (
+                <div className="mini-card family-head" data-testid="add-grade-form">
+                  <input className="input" value={newGradeName} onChange={(e) => setNewGradeName(e.target.value)} placeholder="e.g. PK-3" data-testid="add-grade-input" />
+                  <div className="row" style={{ gap: 8 }}>
+                    <button className="button small primary" onClick={addGrade} disabled={!newGradeName.trim()} data-testid="add-grade-save-button">Add</button>
+                    <button className="button small secondary" onClick={() => { setAddingGrade(false); setNewGradeName(""); }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <button className="button small secondary" onClick={() => setAddingGrade(true)} data-testid="add-grade-button">+ Add grade or group</button>
+              )
+            )}
           </section>
         )}
-        {detail?.grades && <section className="stack"><h2 className="section-label">GRADE COMMUNITIES</h2>{detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name.replace("Mulgrave ", "")}</strong><p className="muted">{grade.member_count} members</p></div>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => setSponsorPromptId(grade.community_id)}>Join</button>}</div>)}</section>}
         {detail?.members?.length > 0 && <section className="stack"><h2 className="section-label">MEMBERS</h2>{detail.members.map((member) => <ParentRow key={member.user_id} parent={member} />)}</section>}
         {proposalMatch && <button className="button primary" onClick={() => setProposal({ match: proposalMatch })}>Propose Playdate →</button>}
       </main>
