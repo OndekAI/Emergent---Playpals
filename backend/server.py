@@ -112,10 +112,7 @@ class CommunityCreate(BaseModel):
 
 class JoinCommunityRequest(BaseModel):
     community_id: str
-    sponsor_name: Optional[str] = None
-    teacher_name: Optional[str] = None
-    child_grade: Optional[str] = None
-    via_link: bool = False
+    class_or_teacher: Optional[str] = None
 
 
 class TagSponsorRequest(BaseModel):
@@ -946,29 +943,21 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         raise HTTPException(status_code=404, detail="Community not found")
     existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
     if existing:
-        return {"membership": existing, "community": community}
-    status = "provisional"
-    sponsor_id = None
-    if payload.via_link:
-        status = "active"
-        if payload.sponsor_name:
-            sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
-            if sponsor:
-                sponsor_id = sponsor["user_id"]
-    elif payload.sponsor_name:
-        sponsor = await db.users.find_one({"name": {"$regex": payload.sponsor_name, "$options": "i"}}, {"_id": 0})
-        if sponsor:
-            sponsor_id = sponsor["user_id"]
-            status = "pending_sponsor"
-    elif payload.teacher_name and payload.child_grade:
-        status = "active"
-        await add_credit(user["user_id"], 1, "school_verified_join", payload.community_id)
-    membership = {"membership_id": new_id("member"), "community_id": payload.community_id, "parent_id": user["user_id"], "status": status, "sponsor_id": sponsor_id, "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat() if status == "provisional" else None}
+        return {"membership": existing, "community": community, "already_member": True}
+    membership = {
+        "membership_id": new_id("member"),
+        "community_id": payload.community_id,
+        "parent_id": user["user_id"],
+        "status": "active",
+        "sponsor_id": None,
+        "class_or_teacher": payload.class_or_teacher,
+        "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only",
+        "joined_at": now_iso(),
+        "provisional_expires_at": None,
+    }
     await db.community_members.insert_one(membership.copy())
-    if sponsor_id:
-        await notify_parent(sponsor_id, "Sponsor request", f"{user['name']} wants to join {community['name']}. Do you know them?", "sponsor", membership["membership_id"])
-    await notify_parent(user["user_id"], "Community joined", f"You're now {status} in {community['name']}.", "community", payload.community_id)
-    return {"membership": membership, "community": community}
+    await notify_parent(user["user_id"], "Community joined", f"You're now a member of {community['name']}.", "community", payload.community_id)
+    return {"membership": membership, "community": community, "already_member": False}
 
 
 @api_router.post("/communities/{community_id}/tag-sponsor")

@@ -864,8 +864,12 @@ function CreateCommunityModal({ onClose, refreshAll }) {
     try {
       const result = duplicate || await check();
       if (result.result === "duplicate") return toast.info("This community already exists. Join it from the directory.");
-      await api("/communities", { method: "POST", body: JSON.stringify({ name, city, type: track, connection: "parent", scope }) });
-      toast.success("Community created");
+      const response = await api("/communities", { method: "POST", body: JSON.stringify({ name, city, type: track, connection: "parent", scope }) });
+      if (response.community?.status === "pending_approval") {
+        toast.success("Request sent — you'll be notified when it's approved");
+      } else {
+        toast.success("Community created");
+      }
       await refreshAll();
       onClose();
     } catch (error) { toast.error(error.message); }
