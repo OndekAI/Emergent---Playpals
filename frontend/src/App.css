@@ -426,7 +426,7 @@
 
 .stat-tile {
     min-height: 86px;
-    background: #fff;
+    background: var(--oatmeal-light);
     border-radius: 16px;
     box-shadow: var(--shadow);
     padding: 12px 8px;
@@ -444,7 +444,7 @@
 .match-heading { margin: 0; font-size: 17px; font-weight: 600; color: var(--charcoal); }
 .section-row > span { color: var(--terracotta); font-weight: 600; }
 .match-scroll { display: flex; flex-direction: column; gap: 12px; }
-.match-card { background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; border-left: 4px solid var(--amber); }
+.match-card { background: var(--oatmeal-light); border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; border-left: 4px solid var(--amber); }
 .match-card.high { border-left-color: var(--sage); }
 .match-card h3 { margin: 0; font-size: 16px; font-weight: 600; }
 .score-badge { border-radius: 999px; padding: 6px 8px; font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -466,7 +466,7 @@
 .week-day em { display: block; }
 .filter-pill { min-height: 44px; border-radius: 999px; padding: 0 14px; border: 1px solid rgba(140,110,110,.55); background: transparent; color: var(--stone); font-weight: 600; }
 .filter-pill.active { background: var(--terracotta); color: white; border-color: var(--terracotta); }
-.activity-card { position: relative; display: flex; gap: 12px; align-items: flex-start; background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
+.activity-card { position: relative; display: flex; gap: 12px; align-items: flex-start; background: var(--oatmeal-light); border-radius: 16px; box-shadow: var(--shadow); padding: 14px; }
 .activity-card > i { position: absolute; top: 12px; right: 12px; width: 8px; height: 8px; border-radius: 50%; background: var(--terracotta); }
 .activity-icon { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: 0 0 auto; background: var(--blue); color: white; }
 .activity-icon.playdate,
@@ -479,11 +479,11 @@
 .activity-card p { margin: 3px 0; color: var(--stone); font-size: 13px; }
 .activity-card small { color: var(--stone); font-size: 11px; font-weight: 600; }
 .hint-line { color: var(--stone); font-size: 12px; margin: 0; }
-.family-availability-card { background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; border: 2px solid transparent; }
+.family-availability-card { background: var(--oatmeal-light); border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; border: 2px solid transparent; }
 .family-availability-card.overlapping { border-color: var(--amber); }
 .green-dot { color: var(--sage); }
 
-.community-card { background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
+.community-card { background: var(--oatmeal-light); border-radius: 16px; box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; }
 .community-icon { width: 40px; height: 40px; border-radius: 50%; background: var(--blue); color: #fff; display: grid; place-items: center; flex: 0 0 auto; }
 .community-icon.big { width: 48px; height: 48px; }
 .text-link { border: 0; background: transparent; color: var(--stone); text-align: left; padding: 0; font-size: 13px; font-weight: 500; }
@@ -492,7 +492,7 @@
 .search-bar input { border: 0; outline: 0; flex: 1; color: var(--charcoal); }
 .slide-screen { position: fixed; inset: 0; max-width: 480px; margin: 0 auto; background: var(--oatmeal); z-index: 60; animation: slideIn .24s ease both; overflow: auto; }
 @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
-.parent-row { width: 100%; border: 0; background: #fff; border-radius: 16px; box-shadow: var(--shadow); padding: 12px; display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; text-align: left; }
+.parent-row { width: 100%; border: 0; background: var(--oatmeal-light); border-radius: 16px; box-shadow: var(--shadow); padding: 12px; display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; text-align: left; }
 .parent-row.active { box-shadow: 0 0 0 3px rgba(193,122,90,.12); }
 .radio-card { background: #fff; border: 1px solid rgba(140,110,110,.35); border-radius: 16px; padding: 14px; text-align: left; display: grid; gap: 4px; color: var(--charcoal); }
 .radio-card span { color: var(--stone); font-size: 13px; }
@@ -581,7 +581,7 @@
     box-shadow: inset 0 0 0 1px rgba(45,42,39,.05);
 }
 .day-cell.muted-day { opacity: .34; }
-.day-cell.today { box-shadow: inset 0 0 0 2px var(--blue); }
+.day-cell.today { box-shadow: inset 0 0 0 2px var(--terracotta); }
 .dot-row { display: flex; gap: 3px; height: 6px; }
 .dot { width: 6px; height: 6px; border-radius: 50%; }
 .dot.sage { background: var(--sage); }
@@ -684,7 +684,7 @@
 .center-overlay { position: fixed; inset: 0; background: rgba(45,42,39,.24); z-index: 45; display: flex; align-items: center; justify-content: center; }
 
 .message-list { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow: auto; padding: 6px 0; }
-.message-bubble { max-width: 78%; padding: 10px 12px; border-radius: 16px; background: #fff; box-shadow: var(--shadow); }
+.message-bubble { max-width: 78%; padding: 10px 12px; border-radius: 16px; background: var(--oatmeal-light); box-shadow: var(--shadow); }
 .message-bubble.mine { margin-left: auto; background: rgba(193,122,90,.18); }
 .message-meta { font-size: 11px; color: var(--stone); font-weight: 500; }
 
