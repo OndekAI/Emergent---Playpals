@@ -551,10 +551,9 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
   );
 }
 
-function CalendarView({ dashboard, refresh }) {
+function CalendarView({ dashboard, refresh, selectedDate, onSelectDate }) {
   const [cursor, setCursor] = useState(new Date());
   const [view, setView] = useState("month");
-  const [selected, setSelected] = useState(null);
   const availability = dashboard?.availability || [];
   const playdates = dashboard?.playdates || [];
   const availabilityDates = new Set(availability.map((slot) => slot.date));
@@ -600,7 +599,7 @@ function CalendarView({ dashboard, refresh }) {
           const inMonth = day.getMonth() === cursor.getMonth() || view !== "month";
           const today = value === isoDate(new Date());
           return (
-            <button key={value} className={`day-cell ${inMonth ? "" : "muted-day"} ${today ? "today" : ""}`} onClick={() => setSelected(day)} data-testid={`calendar-day-${value}`}>
+            <button key={value} className={`day-cell ${inMonth ? "" : "muted-day"} ${today ? "today" : ""}`} onClick={() => onSelectDate(day)} data-testid={`calendar-day-${value}`}>
               <span data-testid={`calendar-day-number-${value}`}>{view === "day" ? fmtDate(value, { weekday: "long", month: "long", day: "numeric" }) : day.getDate()}</span>
               <span className="dot-row" data-testid={`calendar-dots-${value}`}>
                 {availabilityDates.has(value) && <span className="dot sage" />}
@@ -614,7 +613,7 @@ function CalendarView({ dashboard, refresh }) {
       <div className="chip-row" data-testid="calendar-legend">
         <span className="badge sage">Sage = available</span><span className="badge terra">Terracotta = confirmed</span><span className="badge amber">Amber = pending</span>
       </div>
-      {selected && <AvailabilitySheet selectedDate={selected} availability={availability} onClose={() => setSelected(null)} onSaved={refresh} />}
+      {selectedDate && <AvailabilitySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} />}
     </section>
   );
 }
@@ -625,29 +624,19 @@ function PlaydatesPage({ user, dashboard, refresh }) {
   const [proposal, setProposal] = useState(null);
   const [filter, setFilter] = useState("Upcoming");
   const [feedFilter, setFeedFilter] = useState("Overlapping with me");
+  const [selectedDate, setSelectedDate] = useState(null);
   useEffect(() => { api("/community-feed").then(setFeed).catch(() => {}); }, [dashboard]);
-  const week = Array.from({ length: 7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - d.getDay() + i); return d; });
-  const availabilityDates = new Set((dashboard?.availability || []).map((s) => s.date));
-  const pendingDates = new Set((dashboard?.playdates || []).filter((p) => ["proposed", "countered"].includes(p.status)).map((p) => p.date));
-  const confirmedDates = new Set((dashboard?.playdates || []).filter((p) => ["confirmed", "rescheduled"].includes(p.status)).map((p) => p.date));
   const visiblePlaydates = (dashboard?.playdates || []).filter((p) => filter === "All" || (filter === "Completed" ? p.status === "completed" : p.status !== "completed"));
   const overlapIds = new Set((feed.matches || []).map((m) => m.parent.user_id));
   const families = (feed.families || []).filter((family) => feedFilter === "All families" || (feedFilter === "Overlapping with me" ? overlapIds.has(family.parent.user_id) : true));
   return (
     <AppLayout title="Playdates" user={user}>
       <div className="stack stagger">
-        <button className="button primary" onClick={() => setShowGroup(true)} data-testid="new-playdate-button"><Plus size={18} /> New Playdate</button>
-        <section className="week-card" data-testid="playdates-week-section">
-          <div className="week-strip" data-testid="week-strip">
-            {week.map((day) => {
-              const value = isoDate(day); const today = value === isoDate(new Date());
-              return <button key={value} className="week-day" data-testid={`week-day-${value}`}><span>{day.toLocaleDateString(undefined, { weekday: "short" })}</span><b className={today ? "today" : ""}>{day.getDate()}</b><i>{availabilityDates.has(value) && <em className="dot sage" />}{confirmedDates.has(value) && <em className="dot terra" />}{pendingDates.has(value) && <em className="dot amber" />}</i></button>;
-            })}
-          </div>
-          <div className="chip-row" data-testid="playdate-filter-pills">{["Upcoming", "Completed", "All"].map((item) => <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`filter-${item.toLowerCase()}-button`}>{item}</button>)}</div>
-        </section>
-        <CalendarView dashboard={dashboard} refresh={refresh} />
-        <button className="button blue" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> New Group Playdate</button>
+        <div className="chip-row" data-testid="playdates-action-row">
+          <button className="button sage-outline" onClick={() => setSelectedDate(new Date())} data-testid="set-availability-button"><Plus size={18} /> Set Availability</button>
+          <button className="button primary" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> Group Playdate</button>
+        </div>
+        <CalendarView dashboard={dashboard} refresh={refresh} selectedDate={selectedDate} onSelectDate={setSelectedDate} />
         <section className="stack" data-testid="playdates-availability-feed">
           <h2 className="section-label" data-testid="who-free-title">WHO'S FREE THIS WEEK</h2>
           <div className="chip-row">{["Overlapping with me", "Free this week", "All families"].map((item) => <button key={item} className={`filter-pill ${feedFilter === item ? "active" : ""}`} onClick={() => setFeedFilter(item)} data-testid={`feed-filter-${item.toLowerCase().replaceAll(" ", "-")}`}>{item}</button>)}</div>
@@ -657,6 +646,7 @@ function PlaydatesPage({ user, dashboard, refresh }) {
         </section>
         <section className="stack" data-testid="playdate-list-section">
           <h2 className="section-title" data-testid="playdate-list-title">Proposals & plans</h2>
+          <div className="chip-row" data-testid="playdate-filter-pills">{["Upcoming", "Completed", "All"].map((item) => <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`filter-${item.toLowerCase()}-button`}>{item}</button>)}</div>
           {visiblePlaydates.length ? visiblePlaydates.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />) : <div className="empty-state card" data-testid="playdates-empty-state">No playdates yet.</div>}
         </section>
       </div>

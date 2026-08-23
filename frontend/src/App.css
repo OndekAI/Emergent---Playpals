@@ -1,6 +1,6 @@
 :root {
     --oatmeal: #F5F0E8;
-    --oatmeal-light: #FFFFFF;
+    --oatmeal-light: #FDFAF5;
     --terracotta: #C17A5A;
     --sage: #9DB89A;
     --blue: #7A9EBD;
@@ -276,6 +276,7 @@
 .button.ghost { background: transparent; color: var(--stone); min-height: 44px; }
 .button.amber-outline { background: transparent; color: #8B5A18; border: 2px solid var(--amber); width: 100%; }
 .button.blue-outline { background: transparent; color: #416985; border: 2px solid var(--blue); }
+.button.sage-outline { background: transparent; color: #4f6d4d; border: 2px solid var(--sage); }
 .button.small { min-height: 44px; padding: 0 12px; border-radius: 14px; font-size: 13px; }
 .button:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
 
