@@ -380,7 +380,7 @@ function MatchCard({ match, onPropose, onDismiss }) {
           <h3 data-testid={`match-children-${match.match_id}`}>{childA.first_name || "Your child"} & {childB.first_name || "Friend"}</h3>{process.env.NODE_ENV !== "production" && match.parent?.user_id?.startsWith("sample_") && <p className="muted" data-testid={`match-demo-${match.match_id}`}>Demo family</p>}
           <p className="muted" data-testid={`match-meta-${match.match_id}`}>Ages {childA.age || "?"} & {childB.age || "?"} · {ageGap}yr apart · {match.parent?.name}</p>
         </div>
-        <span className={`score-badge ${high ? "sage" : "amber"}`} data-testid={`match-score-${match.match_id}`}>{match.score || 80}% · {match.score_label || "Great match"}</span>
+        <span className={`score-badge ${high ? "sage" : "amber"}`} data-testid={`match-score-${match.match_id}`}>{match.score_label || "Great match"}</span>
       </div>
       <span className="badge sage" data-testid={`match-tier-${match.match_id}`}>{tierText(match.parent)}</span>
       <div className="stack" style={{ gap: 8 }}>
