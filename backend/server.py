@@ -984,8 +984,9 @@ async def approve_community(community_id: str, admin: Dict[str, Any] = Depends(r
         raise HTTPException(status_code=404, detail="Community not found")
     if community["status"] == "active":
         return {"approved": True, "community": community}
-    await db.communities.update_one({"community_id": community_id}, {"$set": {"status": "active"}})
-    await db.communities.update_many({"master_community_id": community_id, "status": "pending_approval"}, {"$set": {"status": "active"}})
+    approved_at = now_iso()
+    await db.communities.update_one({"community_id": community_id}, {"$set": {"status": "active", "approved_at": approved_at, "approved_by": admin["user_id"]}})
+    await db.communities.update_many({"master_community_id": community_id, "status": "pending_approval"}, {"$set": {"status": "active", "approved_at": approved_at, "approved_by": admin["user_id"]}})
     creator_id = community.get("created_by")
     if creator_id:
         existing_membership = await db.community_members.find_one({"community_id": community_id, "parent_id": creator_id}, {"_id": 0})
@@ -1045,13 +1046,26 @@ async def list_pending_communities(admin: Dict[str, Any] = Depends(require_admin
 @api_router.get("/admin/communities/approved")
 async def list_approved_communities(admin: Dict[str, Any] = Depends(require_admin)):
     masters = await db.communities.find({"status": "active", "master_community_id": None}, {"_id": 0}).sort("name", 1).to_list(200)
+    approver_names = {}
+
+    async def approver_name(user_id):
+        if not user_id:
+            return None
+        if user_id not in approver_names:
+            approver = await db.users.find_one({"user_id": user_id}, {"_id": 0, "name": 1})
+            approver_names[user_id] = approver["name"] if approver else None
+        return approver_names[user_id]
+
+    async def enrich(community):
+        community["member_count"] = await db.community_members.count_documents({"community_id": community["community_id"], "status": "active"})
+        community["approved_by_name"] = await approver_name(community.get("approved_by"))
+        return community
+
     result = []
     for master in masters:
-        master["member_count"] = await db.community_members.count_documents({"community_id": master["community_id"], "status": "active"})
+        master = await enrich(master)
         subs = await db.communities.find({"master_community_id": master["community_id"], "status": "active"}, {"_id": 0}).sort("name", 1).to_list(100)
-        for sub in subs:
-            sub["member_count"] = await db.community_members.count_documents({"community_id": sub["community_id"], "status": "active"})
-        master["subs"] = subs
+        master["subs"] = [await enrich(sub) for sub in subs]
         result.append(master)
     return result
 

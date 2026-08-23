@@ -13,6 +13,7 @@ import {
   Baby,
   CalendarDays,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -1602,6 +1603,7 @@ function AdminApprovedCommunities() {
   const [approved, setApproved] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copiedId, setCopiedId] = useState(null);
+  const [expanded, setExpanded] = useState(() => new Set());
 
   useEffect(() => {
     api("/admin/communities/approved")
@@ -1616,33 +1618,71 @@ function AdminApprovedCommunities() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  const toggleExpanded = (id) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const approvedMeta = (community) => {
+    if (!community.approved_at) return null;
+    const when = fmtDate(community.approved_at.slice(0, 10), { month: "short", day: "numeric" });
+    return community.approved_by_name ? `Approved ${when} by ${community.approved_by_name}` : `Approved ${when}`;
+  };
+
   if (loading || !approved.length) return null;
 
   return (
     <section className="card stack" data-testid="admin-approved-communities-card">
       <h2 className="card-title" data-testid="admin-approved-communities-title">Approved communities</h2>
-      {approved.map((master) => (
-        <div className="stack" style={{ gap: 6 }} key={master.community_id} data-testid={`admin-approved-group-${master.community_id}`}>
-          <div className="mini-card family-head">
-            <div><strong data-testid={`admin-approved-name-${master.community_id}`}>{master.name}</strong><p className="muted">{master.city || ""} · {master.member_count} members</p></div>
-            <button className="button small secondary" onClick={() => copyLink(master.community_id, master.join_slug)} data-testid={`admin-approved-copy-${master.community_id}`}>
-              {copiedId === master.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
-            </button>
-          </div>
-          {master.subs?.length > 0 && (
-            <div className="stack" style={{ gap: 6, marginLeft: 20 }} data-testid={`admin-approved-subs-${master.community_id}`}>
-              {master.subs.map((sub) => (
-                <div className="mini-card family-head" key={sub.community_id} data-testid={`admin-approved-sub-${sub.community_id}`}>
-                  <div><strong>{sub.name}</strong><p className="muted">{sub.member_count} members</p></div>
-                  <button className="button small secondary" onClick={() => copyLink(sub.community_id, sub.join_slug)} data-testid={`admin-approved-sub-copy-${sub.community_id}`}>
-                    {copiedId === sub.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
-                  </button>
+      {approved.map((master) => {
+        const hasSubs = master.subs?.length > 0;
+        const isOpen = expanded.has(master.community_id);
+        const meta = approvedMeta(master);
+        return (
+          <div className="stack" style={{ gap: 6 }} key={master.community_id} data-testid={`admin-approved-group-${master.community_id}`}>
+            <div
+              className="mini-card family-head"
+              onClick={() => hasSubs && toggleExpanded(master.community_id)}
+              style={{ cursor: hasSubs ? "pointer" : "default" }}
+              data-testid={`admin-approved-${master.community_id}`}
+            >
+              <div className="row" style={{ gap: 8 }}>
+                {hasSubs && (isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />)}
+                <div>
+                  <strong data-testid={`admin-approved-name-${master.community_id}`}>{master.name}</strong>
+                  <p className="muted">{master.city || ""} · {master.member_count} members{hasSubs ? ` · ${master.subs.length} sub-communities` : ""}</p>
+                  {meta && <p className="muted" style={{ fontSize: 11 }}>{meta}</p>}
                 </div>
-              ))}
+              </div>
+              <button className="button small secondary" onClick={(e) => { e.stopPropagation(); copyLink(master.community_id, master.join_slug); }} data-testid={`admin-approved-copy-${master.community_id}`}>
+                {copiedId === master.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
+              </button>
             </div>
-          )}
-        </div>
-      ))}
+            {isOpen && hasSubs && (
+              <div className="stack" style={{ gap: 6, marginLeft: 20 }} data-testid={`admin-approved-subs-${master.community_id}`}>
+                {master.subs.map((sub) => {
+                  const subMeta = approvedMeta(sub);
+                  return (
+                    <div className="mini-card family-head" key={sub.community_id} data-testid={`admin-approved-sub-${sub.community_id}`}>
+                      <div>
+                        <strong>{sub.name}</strong>
+                        <p className="muted">{sub.member_count} members</p>
+                        {subMeta && <p className="muted" style={{ fontSize: 11 }}>{subMeta}</p>}
+                      </div>
+                      <button className="button small secondary" onClick={() => copyLink(sub.community_id, sub.join_slug)} data-testid={`admin-approved-sub-copy-${sub.community_id}`}>
+                        {copiedId === sub.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </section>
   );
 }
