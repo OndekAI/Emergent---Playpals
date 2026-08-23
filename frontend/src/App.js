@@ -645,10 +645,6 @@ function PlaydatesPage({ user, dashboard, refresh }) {
           </div>
           <div className="chip-row" data-testid="playdate-filter-pills">{["Upcoming", "Completed", "All"].map((item) => <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`filter-${item.toLowerCase()}-button`}>{item}</button>)}</div>
         </section>
-        <section className="stack" data-testid="activity-feed-section">
-          {(dashboard?.notifications || []).slice(0, 4).map((note) => <ActivityCard note={note} key={note.notification_id} />)}
-          {!dashboard?.notifications?.length && <div className="empty-state card" data-testid="activity-feed-empty">No activity yet.</div>}
-        </section>
         <CalendarView dashboard={dashboard} refresh={refresh} />
         <button className="button blue" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> New Group Playdate</button>
         <section className="stack" data-testid="playdates-availability-feed">
