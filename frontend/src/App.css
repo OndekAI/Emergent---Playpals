@@ -549,6 +549,7 @@
 
 .playdate-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .playdate-actions .button { flex: 1; min-width: 0; border-radius: 999px; }
+.playdate-actions .button.secondary { background: var(--oatmeal); border-color: rgba(45,42,39,.12); }
 
 .chip-row { gap: 8px; flex-wrap: wrap; }
 .chip {
