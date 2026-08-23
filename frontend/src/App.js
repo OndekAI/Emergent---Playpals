@@ -351,7 +351,7 @@ function HomePage({ user, dashboard, refresh }) {
         <section className="stack" data-testid="home-upcoming-section">
           <h2 className="section-title" data-testid="home-upcoming-title">Upcoming</h2>
           {upcoming.length ? upcoming.map((playdate) => (
-            <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} refresh={refresh} />
+            <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />
           )) : <div className="empty-state card" data-testid="home-empty-upcoming">No playdates yet. Community availability is ready when you are.</div>}
         </section>
 
@@ -656,7 +656,7 @@ function PlaydatesPage({ user, dashboard, refresh }) {
         </section>
         <section className="stack" data-testid="playdate-list-section">
           <h2 className="section-title" data-testid="playdate-list-title">Proposals & plans</h2>
-          {visiblePlaydates.length ? visiblePlaydates.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} refresh={refresh} />) : <div className="empty-state card" data-testid="playdates-empty-state">No playdates yet.</div>}
+          {visiblePlaydates.length ? visiblePlaydates.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />) : <div className="empty-state card" data-testid="playdates-empty-state">No playdates yet.</div>}
         </section>
       </div>
       {proposal && <ProposalModal {...proposal} dashboard={dashboard} refresh={refresh} onClose={() => setProposal(null)} />}
@@ -1106,12 +1106,13 @@ function JoinViaLinkScreen({ user, refresh }) {
   );
 }
 
-function PlaydateCard({ playdate, user, refresh }) {
+function PlaydateCard({ playdate, user, dashboard, refresh }) {
   const [showChat, setShowChat] = useState(false);
   const [showComplete, setShowComplete] = useState(false);
   const [showReschedule, setShowReschedule] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
-  const isInvitee = playdate.participants?.some((p) => p.parent_id === user.user_id && p.rsvp_status === "invited");
+  const [showDecline, setShowDecline] = useState(false);
+  const isSender = playdate.organizer_id === user.user_id;
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
   const respond = async (action) => {
     try {
@@ -1120,6 +1121,14 @@ function PlaydateCard({ playdate, user, refresh }) {
       await refresh();
     } catch (error) { toast.error(error.message); }
   };
+  // Chat opens as soon as a proposal exists, for sender and receiver alike — not
+  // only after Accept. Proposals often need a quick clarifying exchange before
+  // either side responds, so gating chat behind Accept (per the original PRD)
+  // was blocking that. Scoped to slot-based 1:1 proposals only: auto-match nudges
+  // (a suggested overlap that hasn't been turned into a proposal yet) are a
+  // different surface and may need stricter chat gating — don't reuse this flag
+  // for those without reconsidering.
+  const chatAvailable = ["proposed", "confirmed", "rescheduled"].includes(playdate.status);
   return (
     <article className="card stack" data-testid={`playdate-card-${playdate.playdate_id}`}>
       <div className="family-head">
@@ -1133,18 +1142,29 @@ function PlaydateCard({ playdate, user, refresh }) {
       <p className="muted" data-testid={`playdate-location-${playdate.playdate_id}`}><MapPin size={15} /> {playdate.location} · {playdate.activity}</p>
       <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name?.split(" ")[0] || "Parent"}</span>)}</div>
       <div className="proposal-actions">
-        {isInvitee && <button className="button sage small" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>}
-        {isInvitee && <button className="button secondary small" onClick={() => respond("decline")} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>}
-        {["confirmed", "rescheduled", "completed"].includes(playdate.status) && <button className="button secondary" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Open Chat</button>}
-        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>}
-        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>}
-        {["confirmed", "rescheduled"].includes(playdate.status) && <button className="button ghost small" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>}
+        {playdate.status === "proposed" && !isSender && (
+          <>
+            <button className="button sage small" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            <button className="button secondary small" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
+          </>
+        )}
+        {playdate.status === "proposed" && isSender && (
+          <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
+        )}
+        {chatAvailable && <button className="button secondary" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Open Chat</button>}
+        {["confirmed", "rescheduled"].includes(playdate.status) && (
+          <>
+            <button className="button secondary small" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>
+            <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
+            <button className="button ghost small" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>
+          </>
+        )}
       </div>
-      {isInvitee && <button className="button amber-outline" onClick={() => setShowReschedule(true)} data-testid={`playdate-counter-${playdate.playdate_id}`}>↳ Counter-propose new time</button>}
       {showChat && <ChatModal playdate={playdate} onClose={() => setShowChat(false)} />}
       {showReschedule && <RescheduleModal playdate={playdate} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
       {showCancel && <CancelModal playdate={playdate} refresh={refresh} onClose={() => setShowCancel(false)} />}
+      {showDecline && <DeclineOrSuggestModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowDecline(false)} />}
     </article>
   );
 }
@@ -1171,6 +1191,67 @@ function RescheduleModal({ playdate, refresh, onClose }) {
           <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="reschedule-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
         </div>
         <button className="button primary" onClick={submit} data-testid="reschedule-submit-button">Send reschedule request</button>
+      </section>
+    </div>
+  );
+}
+
+function DeclineOrSuggestModal({ playdate, dashboard, refresh, onClose }) {
+  const organizer = playdate.participants?.find((p) => p.parent_id === playdate.organizer_id)?.parent;
+  const [date, setDate] = useState(playdate.date);
+  const [start, setStart] = useState(playdate.start_time);
+  const [end, setEnd] = useState(playdate.end_time);
+  const today = isoDate(new Date());
+  const upcomingSlots = (dashboard?.availability || []).filter((slot) => slot.date >= today);
+
+  const sendCounter = async (counterDate, counterStart, counterEnd) => {
+    try {
+      await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action: "counter", counter_date: counterDate, counter_start_time: counterStart, counter_end_time: counterEnd }) });
+      toast.success("Suggested a new time");
+      await refresh();
+      onClose();
+    } catch (error) { toast.error(error.message); }
+  };
+
+  const declineOutright = async () => {
+    try {
+      await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action: "decline" }) });
+      toast.success("Response sent");
+      await refresh();
+      onClose();
+    } catch (error) { toast.error(error.message); }
+  };
+
+  return (
+    <div className="center-overlay" data-testid="decline-suggest-modal-overlay">
+      <section className="modal-panel stack" data-testid="decline-suggest-modal">
+        <div className="sheet-title-row"><h3 data-testid="decline-suggest-title">Can't make it?</h3><button className="icon-button" onClick={onClose} data-testid="decline-suggest-close-button"><X size={20} /></button></div>
+        <p className="muted">Suggest another time for {organizer?.name || "them"} instead of declining outright — or just decline below.</p>
+        {upcomingSlots.length > 0 && (
+          <div className="stack" data-testid="decline-suggest-slots">
+            <h4 className="section-label">FROM YOUR AVAILABILITY</h4>
+            {upcomingSlots.slice(0, 5).flatMap((slot) => (slot.blocks || []).map((block, i) => (
+              <button
+                key={`${slot.date}-${i}`}
+                className="slot-pill"
+                onClick={() => sendCounter(slot.date, block.start, block.end)}
+                data-testid={`decline-suggest-slot-${slot.date}-${i}`}
+              >
+                {fmtDate(slot.date, { weekday: "short", month: "short", day: "numeric" })} · {timeLabel(block.start)}–{timeLabel(block.end)}
+              </button>
+            )))}
+          </div>
+        )}
+        <div className="stack">
+          <h4 className="section-label">OR PICK A CUSTOM TIME</h4>
+          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="decline-suggest-date-input" />
+          <div className="row" style={{ gap: 8 }}>
+            <select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="decline-suggest-start-select">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+            <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="decline-suggest-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+          </div>
+          <button className="button primary" onClick={() => sendCounter(date, start, end)} data-testid="decline-suggest-submit-button">Suggest this time</button>
+        </div>
+        <button className="button ghost" onClick={declineOutright} data-testid="decline-suggest-decline-button">Just decline</button>
       </section>
     </div>
   );
