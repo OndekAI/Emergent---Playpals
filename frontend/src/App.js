@@ -423,6 +423,17 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
   const [recurrence, setRecurrence] = useState("weekly");
   const [visibilityMode, setVisibilityMode] = useState(existing?.visibility_mode || "everyone");
   const [manualIds, setManualIds] = useState(existing?.visible_to_parent_ids || []);
+  const [members, setMembers] = useState([]);
+  const [membersLoading, setMembersLoading] = useState(true);
+  useEffect(() => {
+    api("/community-members")
+      .then(setMembers)
+      .catch(() => setMembers([]))
+      .finally(() => setMembersLoading(false));
+  }, []);
+  const toggleManual = (parentId) => {
+    setManualIds((prev) => prev.includes(parentId) ? prev.filter((id) => id !== parentId) : [...prev, parentId]);
+  };
   const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
   const isPast = isoDate(selectedDate) < isoDate(new Date());
@@ -501,7 +512,34 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
               <div className="visibility-options">
                 {[["everyone", "Everyone in my communities"], ["manual", "Only people I select"], ["request_only", "Only people who request"]].map(([value, label]) => <button key={value} className={`radio-pill ${visibilityMode === value ? "active" : ""}`} onClick={() => setVisibilityMode(value)} data-testid={`visibility-${value}-button`}>{label}</button>)}
               </div>
-              {visibilityMode === "manual" && <div className="manual-list" data-testid="manual-visibility-list"><p className="muted">Select people from community member lists after joining communities.</p><input className="input" value={manualIds.join(",")} onChange={(e) => setManualIds(e.target.value.split(",").map((x) => x.trim()).filter(Boolean))} placeholder="Parent IDs for now" data-testid="manual-visible-parent-ids" /></div>}
+              {visibilityMode === "manual" && (
+                <div className="manual-list stack" data-testid="manual-visibility-list">
+                  {membersLoading ? (
+                    <p className="muted">Loading your community members…</p>
+                  ) : members.length ? (
+                    members.map((member) => {
+                      const checked = manualIds.includes(member.user_id);
+                      return (
+                        <button
+                          type="button"
+                          key={member.user_id}
+                          className={`parent-row ${checked ? "active" : ""}`}
+                          onClick={() => toggleManual(member.user_id)}
+                          data-testid={`manual-visible-option-${member.user_id}`}
+                        >
+                          <div className="avatar-circle" style={{ width: 36, height: 36 }}>
+                            {member.picture ? <img src={member.picture} alt="" /> : member.name?.[0]?.toUpperCase()}
+                          </div>
+                          <strong>{member.name}</strong>
+                          {checked && <Check size={18} data-testid={`manual-visible-checked-${member.user_id}`} />}
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <p className="muted">Join a community to select people here.</p>
+                  )}
+                </div>
+              )}
             </section>
             <button className="button primary" onClick={save} data-testid="availability-save-button">Save availability →</button>
             {existing && <button className="button secondary" onClick={remove} data-testid="availability-remove-date-button">Remove this date</button>}

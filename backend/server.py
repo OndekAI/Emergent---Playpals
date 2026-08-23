@@ -1162,6 +1162,14 @@ async def community_feed(user: Dict[str, Any] = Depends(current_user)):
     return {"families": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"])}
 
 
+@api_router.get("/community-members")
+async def community_members(user: Dict[str, Any] = Depends(current_user)):
+    peer_ids = await common_community_parent_ids(user["user_id"])
+    members = [m for m in [await public_parent(pid) for pid in peer_ids] if m]
+    members.sort(key=lambda m: m["name"])
+    return members
+
+
 async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     own_slots = await db.availability_slots.find({"parent_id": parent_id, "date": {"$gte": date.today().isoformat()}, "is_paused": False}, {"_id": 0}).to_list(500)
     if not own_slots:
