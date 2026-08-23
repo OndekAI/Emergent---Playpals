@@ -1172,7 +1172,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
       <div className="proposal-actions">
         {playdate.status === "proposed" && !isSender && (
           <>
-            <button className="button secondary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
             <button className="button secondary" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
           </>
         )}
@@ -1181,7 +1181,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
         )}
         {playdate.status === "countered" && !sentCounter && (
           <>
-            <button className="button secondary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
             <button className="button secondary" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
           </>
         )}
@@ -1193,7 +1193,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
           <>
             <button className="button secondary" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>
             <button className="button secondary" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
-            <button className="button secondary" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>
+            <button className="button primary" onClick={() => setShowComplete(true)} data-testid={`playdate-complete-open-${playdate.playdate_id}`}>Complete</button>
           </>
         )}
       </div>
