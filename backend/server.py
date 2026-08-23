@@ -1482,7 +1482,10 @@ async def send_message(playdate_id: str, payload: ChatMessageCreate, user: Dict[
         raise HTTPException(status_code=400, detail="Chat is not available for this playdate")
     message = {"message_id": new_id("msg"), "playdate_id": playdate_id, "sender_id": user["user_id"], "sender_name": user["name"], "content": payload.content, "created_at": now_iso(), "read_at": None}
     await db.messages.insert_one(message.copy())
-    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}, "rsvp_status": "accepted"}, {"_id": 0}).to_list(20)
+    # Notify every other participant regardless of RSVP status (invited/accepted/etc) —
+    # chat is open on proposed/countered playdates too, so a not-yet-accepted parent
+    # still needs to be alerted to a new message. Only exclude parents who declined.
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}, "rsvp_status": {"$ne": "declined"}}, {"_id": 0}).to_list(20)
     for participant_row in participants:
         await notify_parent(participant_row["parent_id"], "New playdate chat message", f"{user['name']}: {payload.content[:80]}", "chat", playdate_id)
     return message

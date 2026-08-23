@@ -636,7 +636,8 @@ function PlaydatesPage({ user, dashboard, refresh }) {
       <div className="stack stagger">
         <div className="chip-row" data-testid="playdates-action-row">
           <button className="button sage-outline" onClick={() => setSelectedDate(new Date())} data-testid="set-availability-button"><Plus size={18} /> Set Availability</button>
-          <button className="button primary" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> Group Playdate</button>
+          {/* Hidden: feature not ready, deferred to P2.3 per Enhancement Priorities doc. Modal/state/route left intact. */}
+          {false && <button className="button primary" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> Group Playdate</button>}
         </div>
         <CalendarView dashboard={dashboard} refresh={refresh} selectedDate={selectedDate} onSelectDate={setSelectedDate} />
         <section className="stack" data-testid="playdates-availability-feed">
@@ -1200,7 +1201,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
           </>
         )}
       </div>
-      {showChat && <ChatModal playdate={playdate} onClose={() => setShowChat(false)} />}
+      {showChat && <ChatModal playdate={playdate} user={user} onClose={() => setShowChat(false)} />}
       {showReschedule && <RescheduleModal playdate={playdate} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
       {showCancel && <CancelModal playdate={playdate} refresh={refresh} onClose={() => setShowCancel(false)} />}
@@ -1297,7 +1298,7 @@ function DeclineOrSuggestModal({ playdate, dashboard, refresh, onClose }) {
   );
 }
 
-function ChatModal({ playdate, onClose }) {
+function ChatModal({ playdate, user, onClose }) {
   const [messages, setMessages] = useState([]);
   const [content, setContent] = useState("");
   const load = useCallback(async () => {
@@ -1310,13 +1311,32 @@ function ChatModal({ playdate, onClose }) {
   };
   const locked = ["completed", "cancelled"].includes(playdate.status);
   return (
-    <div className="chat-screen" data-testid="chat-screen">
-      <header className="top-header"><button className="icon-button" onClick={onClose} data-testid="chat-back-button"><ChevronLeft size={20} /></button><div className="screen-title" data-testid="chat-title">{playdate.title}</div><span className={`badge ${playdate.status === "completed" ? "terra" : "sage"}`}>{playdate.status.toUpperCase()}</span></header>
-      <section className="chat-thread" data-testid="chat-message-list">
-          {messages.map((m) => <div key={m.message_id} className="chat-message-row" data-testid={`chat-message-${m.message_id}`}><div className="message-bubble"><div>{m.content}</div><small>{new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</small></div></div>)}
+    <div className="center-overlay" data-testid="chat-screen" onClick={onClose}>
+      <section className="modal-panel chat-panel stack" data-testid="chat-modal-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-title-row">
+          <div>
+            <h3 data-testid="chat-title">{playdate.title}</h3>
+            <span className={`badge ${playdate.status === "completed" ? "terra" : "sage"}`}>{playdate.status.toUpperCase()}</span>
+          </div>
+          <button className="icon-button" onClick={onClose} data-testid="chat-back-button"><X size={20} /></button>
+        </div>
+        <section className="chat-thread" data-testid="chat-message-list">
+          {messages.map((m) => {
+            const mine = m.sender_id === user?.user_id;
+            return (
+              <div key={m.message_id} className={`chat-message-row ${mine ? "mine" : "theirs"}`} data-testid={`chat-message-${m.message_id}`}>
+                <div className={`message-bubble ${mine ? "mine" : ""}`}>
+                  {!mine && <div className="message-meta">{m.sender_name}</div>}
+                  <div>{m.content}</div>
+                  <small>{new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</small>
+                </div>
+              </div>
+            );
+          })}
           {!messages.length && <div className="empty-state" data-testid="chat-empty-state">No messages yet.</div>}
+        </section>
+        {locked ? <div className="chat-locked" data-testid="chat-locked-banner"><Lock size={18} /> Chat is locked after a playdate ends.</div> : <div className="chat-input-bar"><input value={content} onChange={(e) => setContent(e.target.value)} placeholder="Message..." data-testid="chat-message-input" /><button onClick={send} disabled={!content.trim()} data-testid="chat-send-button"><Send size={18} /></button></div>}
       </section>
-      {locked ? <div className="chat-locked" data-testid="chat-locked-banner"><Lock size={18} /> Chat is locked after a playdate ends.</div> : <div className="chat-input-bar"><input value={content} onChange={(e) => setContent(e.target.value)} placeholder="Message..." data-testid="chat-message-input" /><button onClick={send} disabled={!content.trim()} data-testid="chat-send-button"><Send size={18} /></button></div>}
     </div>
   );
 }
