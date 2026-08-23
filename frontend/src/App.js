@@ -645,7 +645,7 @@ function PlaydatesPage({ user, dashboard, refresh }) {
           {!families.length && <div className="empty-state card" data-testid="family-feed-empty">No families match this filter yet.</div>}
         </section>
         <section className="stack" data-testid="playdate-list-section">
-          <h2 className="section-title" data-testid="playdate-list-title">Upcoming</h2>
+          <h2 className="section-title" data-testid="playdate-list-title">{filter}</h2>
           <div className="chip-row" data-testid="playdate-filter-pills">{["Upcoming", "Completed", "All"].map((item) => <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`filter-${item.toLowerCase()}-button`}>{item}</button>)}</div>
           {visiblePlaydates.length ? visiblePlaydates.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />) : <div className="empty-state card" data-testid="playdates-empty-state">No playdates yet.</div>}
         </section>
