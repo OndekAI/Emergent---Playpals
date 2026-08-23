@@ -1113,6 +1113,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   const [showCancel, setShowCancel] = useState(false);
   const [showDecline, setShowDecline] = useState(false);
   const isSender = playdate.organizer_id === user.user_id;
+  const sentCounter = playdate.counter?.from_parent_id === user.user_id;
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
   const respond = async (action) => {
     try {
@@ -1127,8 +1128,13 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   // was blocking that. Scoped to slot-based 1:1 proposals only: auto-match nudges
   // (a suggested overlap that hasn't been turned into a proposal yet) are a
   // different surface and may need stricter chat gating — don't reuse this flag
-  // for those without reconsidering.
-  const chatAvailable = ["proposed", "confirmed", "rescheduled"].includes(playdate.status);
+  // for those without reconsidering. "countered" stays in here too — a
+  // counter-proposal is still an active negotiation, not a step back from chat.
+  const chatAvailable = ["proposed", "confirmed", "rescheduled", "countered"].includes(playdate.status);
+  const showingCounter = playdate.status === "countered" && playdate.counter;
+  const displayDate = showingCounter ? playdate.counter.date : playdate.date;
+  const displayStart = showingCounter ? playdate.counter.start_time : playdate.start_time;
+  const displayEnd = showingCounter ? playdate.counter.end_time : playdate.end_time;
   return (
     <article className="card stack" data-testid={`playdate-card-${playdate.playdate_id}`}>
       <div className="family-head">
@@ -1138,7 +1144,8 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
         </div>
         <span className="badge blue" data-testid={`playdate-type-${playdate.playdate_id}`}>{playdate.type}</span>
       </div>
-      <p className="muted" data-testid={`playdate-detail-${playdate.playdate_id}`}><CalendarDays size={15} /> {fmtDate(playdate.date, { weekday: "long", month: "short", day: "numeric" })} · {timeLabel(playdate.start_time)}–{timeLabel(playdate.end_time)}</p>
+      {showingCounter && <p className="hint-line" data-testid={`playdate-counter-hint-${playdate.playdate_id}`}>↳ New time suggested</p>}
+      <p className="muted" data-testid={`playdate-detail-${playdate.playdate_id}`}><CalendarDays size={15} /> {fmtDate(displayDate, { weekday: "long", month: "short", day: "numeric" })} · {timeLabel(displayStart)}–{timeLabel(displayEnd)}</p>
       <p className="muted" data-testid={`playdate-location-${playdate.playdate_id}`}><MapPin size={15} /> {playdate.location} · {playdate.activity}</p>
       <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name?.split(" ")[0] || "Parent"}</span>)}</div>
       <div className="proposal-actions">
@@ -1149,6 +1156,15 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
           </>
         )}
         {playdate.status === "proposed" && isSender && (
+          <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
+        )}
+        {playdate.status === "countered" && !sentCounter && (
+          <>
+            <button className="button sage small" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            <button className="button secondary small" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
+          </>
+        )}
+        {playdate.status === "countered" && sentCounter && (
           <button className="button secondary small" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
         )}
         {chatAvailable && <button className="button secondary" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Open Chat</button>}

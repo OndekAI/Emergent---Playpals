@@ -1306,17 +1306,34 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
     if not participant:
         raise HTTPException(status_code=403, detail="Not a participant")
     if payload.action == "accept":
-        await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
-        accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
-        if accepted >= max(2, playdate.get("min_confirmations", 1)):
-            await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
-            await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
+        if playdate.get("status") == "countered" and playdate.get("counter"):
+            counter = playdate["counter"]
+            await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
+            await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": counter["from_parent_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
+            await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
+                "status": "confirmed",
+                "date": counter["date"],
+                "start_time": counter["start_time"],
+                "end_time": counter["end_time"],
+            }})
+            await notify_parent(counter["from_parent_id"], "Playdate confirmed!", f"{user['name']} accepted your suggested time. {playdate['activity']} is confirmed.", "playdate", playdate_id)
+        else:
+            await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
+            accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
+            if accepted >= max(2, playdate.get("min_confirmations", 1)):
+                await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
+                await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
     elif payload.action == "decline":
         await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
-        await notify_parent(playdate["organizer_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled"}})
+        others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+        for other in others:
+            await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
     elif payload.action == "counter":
         await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "countered", "counter": {"date": payload.counter_date, "start_time": payload.counter_start_time, "end_time": payload.counter_end_time, "from_parent_id": user["user_id"], "created_at": now_iso()}}})
-        await notify_parent(playdate["organizer_id"], "Counter-proposal received", f"{user['name']} suggested another time.", "playdate", playdate_id)
+        others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+        for other in others:
+            await notify_parent(other["parent_id"], "Counter-proposal received", f"{user['name']} suggested another time.", "playdate", playdate_id)
     return {"playdate": await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})}
 
 
