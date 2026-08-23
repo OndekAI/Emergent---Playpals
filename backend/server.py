@@ -1030,7 +1030,16 @@ async def decline_community(community_id: str, payload: CommunityDeclineRequest,
 @api_router.get("/admin/communities/pending")
 async def list_pending_communities(admin: Dict[str, Any] = Depends(require_admin)):
     pending = await db.communities.find({"status": "pending_approval"}, {"_id": 0}).sort("created_at", 1).to_list(200)
-    return {"communities": pending}
+    # A pending sub-community whose master is also still pending will be
+    # cascade-approved automatically the moment its master is (see
+    # approve_community). Don't surface it here as its own item — that's what
+    # was making every school request look like 1 school + 9 grade requests.
+    # A sub-community whose master is already active (a club/group requested
+    # independently, after the school exists) still needs its own decision,
+    # so it stays visible.
+    pending_ids = {c["community_id"] for c in pending}
+    visible = [c for c in pending if c.get("master_community_id") not in pending_ids]
+    return {"communities": visible}
 
 
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
