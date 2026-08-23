@@ -218,11 +218,10 @@ function Header({ title, user }) {
 }
 
 const navItems = [
-  ["/home", "Home", Home, false],
-  ["/playdates", "Playdates", CalendarDays, false],
-  ["/community", "Community", Users, false],
-  ["/messages", "Messages", MessageCircle, true],
-  ["/profile", "Profile", UserRound, false],
+  ["/home", "Home", Home],
+  ["/playdates", "Playdates", CalendarDays],
+  ["/community", "Community", Users],
+  ["/profile", "Profile", UserRound],
 ];
 
 function BottomNav() {
@@ -230,11 +229,11 @@ function BottomNav() {
   const navigate = useNavigate();
   return (
     <nav className="bottom-nav" data-testid="bottom-navigation">
-      {navItems.map(([path, label, Icon, disabled]) => (
+      {navItems.map(([path, label, Icon]) => (
         <button
           key={path}
-          className={`nav-item ${location.pathname.startsWith(path) ? "active" : ""} ${disabled ? "disabled" : ""}`}
-          onClick={() => (disabled ? toast.info("Messages inbox is planned for Phase 2") : navigate(path))}
+          className={`nav-item ${location.pathname.startsWith(path) ? "active" : ""}`}
+          onClick={() => navigate(path)}
           data-testid={`nav-${label.toLowerCase()}-button`}
         >
           <Icon size={24} />
@@ -1457,10 +1456,6 @@ function ChildModal({ child, onClose, refresh }) {
   );
 }
 
-function MessagesPlaceholder({ user }) {
-  return <AppLayout title="Messages" user={user}><div className="empty-state card" data-testid="messages-placeholder">General inbox arrives in Phase 2. Confirmed playdates already have contextual chat.</div></AppLayout>;
-}
-
 function AppRouter() {
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(null);
@@ -1497,7 +1492,6 @@ function AppRouter() {
       <Route path="/playdates" element={<Protected authed={authed} loading={loading}><PlaydatesPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/community" element={<Protected authed={authed} loading={loading}><CommunityPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/join/:slug" element={<JoinLinkGate authed={authed} loading={loading}><JoinViaLinkScreen user={user} refresh={refresh} /></JoinLinkGate>} />
-      <Route path="/messages" element={<Protected authed={authed} loading={loading}><MessagesPlaceholder user={user} /></Protected>} />
       <Route path="/profile" element={<Protected authed={authed} loading={loading}><ProfilePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="*" element={<Navigate to={authed ? "/home" : "/login"} replace />} />
     </Routes>
