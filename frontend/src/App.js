@@ -769,13 +769,31 @@ function CommunityPage({ user, dashboard, refresh }) {
   }, [searchQuery]);
 
   const myCommunities = communities.filter((community) => community.membership);
+  const myMasters = myCommunities.filter((community) => !community.master_community_id);
+  const myMasterIds = new Set(myMasters.map((community) => community.community_id));
+  const subsOf = (masterId) => myCommunities.filter((community) => community.master_community_id === masterId);
+  // A sub-community whose master isn't in myCommunities (only possible for grade
+  // memberships that predate the silent master-membership backfill) has nothing
+  // to nest under — fall back to showing it flat rather than dropping it.
+  const orphanSubs = myCommunities.filter((community) => community.master_community_id && !myMasterIds.has(community.master_community_id));
+  const refreshAll = async () => { await refresh(); await load(); };
 
   return (
     <AppLayout title="Community" user={user}>
       <div className="stack stagger">
         <section className="stack" data-testid="my-communities-section">
           <div className="section-row"><h2 className="section-label" data-testid="my-communities-title">MY COMMUNITIES</h2><button className="icon-button" onClick={() => setShowCreate(true)} data-testid="create-community-open-button"><Plus size={18} /></button></div>
-          {myCommunities.map((community) => <MyCommunityCard key={community.community_id} community={community} onOpen={() => setDrill({ communityId: community.community_id })} refreshAll={async () => { await refresh(); await load(); }} />)}
+          {myMasters.map((community) => (
+            <div className="stack" style={{ gap: 6 }} key={community.community_id} data-testid={`my-community-group-${community.community_id}`}>
+              <MyCommunityCard community={community} onOpen={() => setDrill({ communityId: community.community_id })} refreshAll={refreshAll} />
+              {subsOf(community.community_id).length > 0 && (
+                <div className="stack" style={{ gap: 6, marginLeft: 20 }} data-testid={`my-community-subs-${community.community_id}`}>
+                  {subsOf(community.community_id).map((sub) => <MyCommunitySubRow key={sub.community_id} community={sub} onOpen={() => setDrill({ communityId: sub.community_id })} />)}
+                </div>
+              )}
+            </div>
+          ))}
+          {orphanSubs.map((community) => <MyCommunityCard key={community.community_id} community={community} onOpen={() => setDrill({ communityId: community.community_id })} refreshAll={refreshAll} />)}
           {!myCommunities.length && <div className="empty-state card">No communities joined yet.</div>}
         </section>
         <section className="stack" data-testid="discover-communities-section">
@@ -802,6 +820,18 @@ function CommunityPage({ user, dashboard, refresh }) {
 function MyCommunityCard({ community, onOpen, refreshAll }) {
   const [stepBack, setStepBack] = useState(false);
   return <div className="community-card" data-testid={`my-community-${community.community_id}`} onClick={onOpen}><div className="family-head"><div className="row" style={{ gap: 10 }}><div className="community-icon"><MapPin size={18} /></div><div><strong>{community.name}</strong><p className="muted">{community.city} · {community.member_count} members</p></div></div><span className={`badge ${community.membership?.status === "active" ? "sage" : "amber"}`}>{community.membership?.status}</span></div><button className="text-link" onClick={(e) => { e.stopPropagation(); setStepBack(true); }} data-testid={`step-back-${community.community_id}`}>Step back from this community</button>{stepBack && <StepBackSheet community={community} onClose={() => setStepBack(false)} refreshAll={refreshAll} />}</div>;
+}
+
+function MyCommunitySubRow({ community, onOpen }) {
+  return (
+    <div className="mini-card family-head" onClick={onOpen} data-testid={`my-community-sub-${community.community_id}`}>
+      <div className="row" style={{ gap: 8 }}>
+        <div className="community-icon" style={{ width: 32, height: 32 }}><MapPin size={14} /></div>
+        <div><strong>{community.name}</strong><p className="muted">{community.member_count} members</p></div>
+      </div>
+      <span className={`badge ${community.membership?.status === "active" ? "sage" : "amber"}`}>{community.membership?.status}</span>
+    </div>
+  );
 }
 
 function CommunityDirectoryCard({ community, onOpen }) {
@@ -858,8 +888,8 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
   const addGrade = async () => {
     if (!newGradeName.trim()) return;
     try {
-      await api(`/communities/${communityId}/add-sub`, { method: "POST", body: JSON.stringify({ name: newGradeName.trim() }) });
-      toast.success(`${newGradeName.trim()} added`);
+      const response = await api(`/communities/${communityId}/add-sub`, { method: "POST", body: JSON.stringify({ name: newGradeName.trim() }) });
+      toast.success(response.community?.status === "pending_approval" ? "Request sent — you'll be notified when it's approved" : `${newGradeName.trim()} added`);
       setAddingGrade(false);
       setNewGradeName("");
       await load();
@@ -889,17 +919,17 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
           <section className="stack">
             <h2 className="section-label">GRADE COMMUNITIES</h2>
             {detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name}</strong><p className="muted">{grade.member_count} members</p></div><div className="row" style={{ gap: 8 }}>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => join(grade.community_id)}>Join</button>}{user?.is_admin && grade.join_slug && <button className="button small secondary" onClick={() => copyLink(grade.community_id, grade.join_slug)}>{copiedId === grade.community_id ? <><Check size={15} /> Copied</> : "Copy link"}</button>}</div></div>)}
-            {user?.is_admin && (
+            {(user?.is_admin || detail?.membership?.status === "active") && (
               addingGrade ? (
                 <div className="mini-card family-head" data-testid="add-grade-form">
-                  <input className="input" value={newGradeName} onChange={(e) => setNewGradeName(e.target.value)} placeholder="e.g. PK-3" data-testid="add-grade-input" />
+                  <input className="input" value={newGradeName} onChange={(e) => setNewGradeName(e.target.value)} placeholder="e.g. PK-3, Soccer Team, Dunbar Group" data-testid="add-grade-input" />
                   <div className="row" style={{ gap: 8 }}>
-                    <button className="button small primary" onClick={addGrade} disabled={!newGradeName.trim()} data-testid="add-grade-save-button">Add</button>
+                    <button className="button small primary" onClick={addGrade} disabled={!newGradeName.trim()} data-testid="add-grade-save-button">{user?.is_admin ? "Add" : "Request"}</button>
                     <button className="button small secondary" onClick={() => { setAddingGrade(false); setNewGradeName(""); }}>Cancel</button>
                   </div>
                 </div>
               ) : (
-                <button className="button small secondary" onClick={() => setAddingGrade(true)} data-testid="add-grade-button">+ Add grade or group</button>
+                <button className="button small secondary" onClick={() => setAddingGrade(true)} data-testid="add-grade-button">+ {user?.is_admin ? "Add" : "Request"} grade or group</button>
               )
             )}
           </section>

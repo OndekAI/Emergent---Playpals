@@ -902,7 +902,7 @@ async def community_detail(community_id: str, user: Dict[str, Any] = Depends(cur
 
 @api_router.post("/communities/check-duplicate")
 async def check_community_duplicate(payload: CommunityCheckRequest, user: Dict[str, Any] = Depends(current_user)):
-    existing = await db.communities.find({"status": "active"}, {"_id": 0}).to_list(500)
+    existing = await db.communities.find({"status": {"$in": ["active", "pending_approval"]}}, {"_id": 0}).to_list(500)
     scored = []
     target = f"{payload.name} {payload.city or ''} {payload.type}"
     for community in existing:
@@ -919,18 +919,22 @@ async def check_community_duplicate(payload: CommunityCheckRequest, user: Dict[s
 
 
 @api_router.post("/communities/{community_id}/add-sub")
-async def add_sub_community(community_id: str, payload: AddSubCommunityRequest, admin: Dict[str, Any] = Depends(require_admin)):
+async def add_sub_community(community_id: str, payload: AddSubCommunityRequest, user: Dict[str, Any] = Depends(current_user)):
     parent = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
     if not parent:
         raise HTTPException(status_code=404, detail="Community not found")
+    is_admin = is_admin_email(user.get("email", ""))
+    membership = await db.community_members.find_one({"community_id": community_id, "parent_id": user["user_id"], "status": "active"}, {"_id": 0})
+    if not membership and not is_admin:
+        raise HTTPException(status_code=403, detail="You must be an active member of this community to request a sub-community")
     sub = {
         "community_id": new_id("comm"),
         "name": payload.name,
         "type": payload.type,
         "city": parent.get("city", ""),
         "master_community_id": community_id,
-        "created_by": admin["user_id"],
-        "status": "active",
+        "created_by": user["user_id"],
+        "status": "active" if is_admin else "pending_approval",
         "join_slug": secrets.token_urlsafe(6),
         "created_at": now_iso(),
     }
@@ -1029,6 +1033,32 @@ async def list_pending_communities(admin: Dict[str, Any] = Depends(require_admin
     return {"communities": pending}
 
 
+async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
+    # Silent bookkeeping only: a grade member should also hold an active
+    # membership in the grade's master (school) community, even though there's
+    # no school-wide feed yet to surface it in. This means we won't need to
+    # backfill/migrate existing grade members when that feature ships.
+    master_id = community.get("master_community_id")
+    if not master_id:
+        return
+    if await db.community_members.find_one({"community_id": master_id, "parent_id": parent_id}, {"_id": 0}):
+        return
+    master = await db.communities.find_one({"community_id": master_id}, {"_id": 0})
+    if not master:
+        return
+    await db.community_members.insert_one({
+        "membership_id": new_id("member"),
+        "community_id": master_id,
+        "parent_id": parent_id,
+        "status": "active",
+        "sponsor_id": None,
+        "class_or_teacher": None,
+        "availability_visibility_mode": "everyone" if master.get("type") in ["school", "grade", "extracurricular"] else "request_only",
+        "joined_at": now_iso(),
+        "provisional_expires_at": None,
+    })
+
+
 @api_router.post("/communities/join")
 async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = Depends(current_user)):
     community = await db.communities.find_one({"community_id": payload.community_id}, {"_id": 0})
@@ -1036,6 +1066,7 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         raise HTTPException(status_code=404, detail="Community not found")
     existing = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": user["user_id"]}, {"_id": 0})
     if existing:
+        await ensure_master_membership(community, user["user_id"])
         return {"membership": existing, "community": community, "already_member": True}
     membership = {
         "membership_id": new_id("member"),
@@ -1049,6 +1080,7 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         "provisional_expires_at": None,
     }
     await db.community_members.insert_one(membership.copy())
+    await ensure_master_membership(community, user["user_id"])
     await notify_parent(user["user_id"], "Community joined", f"You're now a member of {community['name']}.", "community", payload.community_id)
     return {"membership": membership, "community": community, "already_member": False}
 
