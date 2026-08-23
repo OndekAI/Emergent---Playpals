@@ -1475,8 +1475,11 @@ async def send_message(playdate_id: str, payload: ChatMessageCreate, user: Dict[
         raise HTTPException(status_code=403, detail="Chat unavailable")
     if playdate["status"] in ["completed", "cancelled"]:
         raise HTTPException(status_code=400, detail="This playdate has ended. Start a new one?")
-    if playdate["status"] not in ["confirmed", "rescheduled"]:
-        raise HTTPException(status_code=400, detail="Chat opens after a playdate is confirmed")
+    # Chat is available as soon as a proposal exists (sender + receiver), not just
+    # after Accept/Confirm — matches the frontend's chatAvailable logic in App.js
+    # (PlaydateCard). See Playdate_Card_Actions_Spec_2026-08-23.md for the decision.
+    if playdate["status"] not in ["proposed", "confirmed", "rescheduled", "countered"]:
+        raise HTTPException(status_code=400, detail="Chat is not available for this playdate")
     message = {"message_id": new_id("msg"), "playdate_id": playdate_id, "sender_id": user["user_id"], "sender_name": user["name"], "content": payload.content, "created_at": now_iso(), "read_at": None}
     await db.messages.insert_one(message.copy())
     participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}, "rsvp_status": "accepted"}, {"_id": 0}).to_list(20)
