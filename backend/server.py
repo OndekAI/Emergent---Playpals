@@ -120,6 +120,10 @@ class AddSubCommunityRequest(BaseModel):
     type: str = "grade"
 
 
+class CommunityDeclineRequest(BaseModel):
+    reason: Optional[str] = None
+
+
 class TagSponsorRequest(BaseModel):
     sponsor_id: str
 
@@ -987,6 +991,36 @@ async def approve_community(community_id: str, admin: Dict[str, Any] = Depends(r
         await notify_parent(creator_id, "Community approved", f"{community['name']} is now live!", "community", community_id)
     updated = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
     return {"approved": True, "community": updated}
+
+
+@api_router.post("/communities/{community_id}/decline")
+async def decline_community(community_id: str, payload: CommunityDeclineRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    community = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    if not community:
+        raise HTTPException(status_code=404, detail="Community not found")
+    if community["status"] == "declined":
+        return {"declined": True, "community": community}
+    reason = (payload.reason or "").strip() or None
+    await db.communities.update_one({"community_id": community_id}, {"$set": {
+        "status": "declined",
+        "decline_reason": reason,
+        "declined_at": now_iso(),
+        "declined_by": admin["user_id"],
+    }})
+    await db.communities.update_many({"master_community_id": community_id, "status": "pending_approval"}, {"$set": {
+        "status": "declined",
+        "decline_reason": reason,
+        "declined_at": now_iso(),
+        "declined_by": admin["user_id"],
+    }})
+    creator_id = community.get("created_by")
+    if creator_id:
+        body = f"Your request to create \"{community['name']}\" wasn't approved."
+        if reason:
+            body += f" Reason: {reason}"
+        await notify_parent(creator_id, "Community request declined", body, "community_declined", community_id)
+    updated = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
+    return {"declined": True, "community": updated}
 
 
 @api_router.get("/admin/communities/pending")

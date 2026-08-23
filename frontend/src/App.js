@@ -1356,6 +1356,9 @@ function AdminPendingCommunities() {
   const [approvedLinks, setApprovedLinks] = useState({});
   const [copiedId, setCopiedId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [declineTarget, setDeclineTarget] = useState(null);
+  const [declineReason, setDeclineReason] = useState("");
+  const [declineBusy, setDeclineBusy] = useState(false);
 
   const loadPending = useCallback(() => {
     setLoading(true);
@@ -1378,6 +1381,25 @@ function AdminPendingCommunities() {
     }
   };
 
+  const closeDecline = () => {
+    setDeclineTarget(null);
+    setDeclineReason("");
+  };
+
+  const decline = async () => {
+    setDeclineBusy(true);
+    try {
+      await api(`/communities/${declineTarget.community_id}/decline`, { method: "POST", body: JSON.stringify({ reason: declineReason.trim() || null }) });
+      toast.success(`${declineTarget.name} declined`);
+      setPending((prev) => prev.filter((c) => c.community_id !== declineTarget.community_id));
+      closeDecline();
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setDeclineBusy(false);
+    }
+  };
+
   const copyLink = (communityId, slug) => {
     const link = `${window.location.origin}/join/${slug}`;
     navigator.clipboard.writeText(link);
@@ -1391,14 +1413,19 @@ function AdminPendingCommunities() {
     <section className="card stack" data-testid="admin-pending-communities-card">
       <h2 className="card-title" data-testid="admin-pending-title">Pending communities</h2>
       {pending.map((community) => (
-        <div className="mini-card" key={community.community_id} data-testid={`admin-pending-${community.community_id}`}>
+        <div className="mini-card family-head" key={community.community_id} data-testid={`admin-pending-${community.community_id}`}>
           <div>
             <strong data-testid={`admin-pending-name-${community.community_id}`}>{community.name}</strong>
             <p className="muted">{community.city || ""}</p>
           </div>
-          <button className="button small primary" onClick={() => approve(community.community_id)} data-testid={`admin-approve-button-${community.community_id}`}>
-            Approve
-          </button>
+          <div className="radio-pills">
+            <button className="button primary" onClick={() => approve(community.community_id)} data-testid={`admin-approve-button-${community.community_id}`}>
+              Approve
+            </button>
+            <button className="button blue-outline" onClick={() => setDeclineTarget(community)} data-testid={`admin-decline-button-${community.community_id}`}>
+              Decline
+            </button>
+          </div>
         </div>
       ))}
       {Object.entries(approvedLinks).map(([communityId, slug]) => (
@@ -1412,6 +1439,33 @@ function AdminPendingCommunities() {
           </button>
         </div>
       ))}
+      {declineTarget && (
+        <div className="sheet-overlay" data-testid="decline-community-sheet-overlay">
+          <section className="bottom-sheet stack" data-testid="decline-community-sheet">
+            <div className="drag-handle" />
+            <div className="sheet-title-row">
+              <h3 data-testid="decline-community-title">Decline "{declineTarget.name}"?</h3>
+              <button className="icon-button" onClick={closeDecline} data-testid="decline-community-close-button"><X size={20} /></button>
+            </div>
+            <p className="muted">Optional — let the parent know why. This is shown to them.</p>
+            <textarea
+              className="textarea"
+              value={declineReason}
+              onChange={(e) => setDeclineReason(e.target.value)}
+              placeholder="e.g. This community already exists — search for it in the directory."
+              data-testid="decline-community-reason-input"
+            />
+            <div className="radio-pills">
+              <button className="button blue-outline" onClick={closeDecline} disabled={declineBusy} data-testid="decline-community-cancel-button">
+                Cancel
+              </button>
+              <button className="button primary" onClick={decline} disabled={declineBusy} data-testid="decline-community-confirm-button">
+                {declineBusy ? "Declining…" : "Confirm decline"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }

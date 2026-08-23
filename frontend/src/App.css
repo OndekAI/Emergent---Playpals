@@ -275,6 +275,7 @@
 .button.sage { background: var(--sage); color: white; }
 .button.ghost { background: transparent; color: var(--stone); min-height: 44px; }
 .button.amber-outline { background: transparent; color: #8B5A18; border: 2px solid var(--amber); width: 100%; }
+.button.blue-outline { background: transparent; color: #416985; border: 2px solid var(--blue); }
 .button.small { min-height: 44px; padding: 0 12px; border-radius: 14px; font-size: 13px; }
 .button:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
 
