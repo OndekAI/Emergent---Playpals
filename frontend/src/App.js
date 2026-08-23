@@ -611,7 +611,9 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate }) {
         })}
       </div>
       <div className="chip-row" data-testid="calendar-legend">
-        <span className="badge sage">Sage = available</span><span className="badge terra">Terracotta = confirmed</span><span className="badge amber">Amber = pending</span>
+        <span className="row" style={{ gap: 6 }} data-testid="legend-available"><span className="dot sage" style={{ width: 10, height: 10 }} />Your availability</span>
+        <span className="row" style={{ gap: 6 }} data-testid="legend-pending"><span className="dot amber" style={{ width: 10, height: 10 }} />Pending proposal</span>
+        <span className="row" style={{ gap: 6 }} data-testid="legend-confirmed"><span className="dot terra" style={{ width: 10, height: 10 }} />Confirmed playdate</span>
       </div>
       {selectedDate && <AvailabilitySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} />}
     </section>
