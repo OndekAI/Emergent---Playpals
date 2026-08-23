@@ -80,6 +80,12 @@
         flex: 0 0 auto;
 }
 
+.brand-row .logo-mark {
+    width: 48px;
+    height: 48px;
+    filter: drop-shadow(0 3px 6px rgba(45, 42, 39, 0.18));
+}
+
 .brand-name {
     font-family: "Fraunces", serif;
     font-size: 18px;
@@ -88,7 +94,7 @@
 }
 
 .hero-copy {
-    padding-top: clamp(92px, 20vh, 150px);
+    padding-top: clamp(64px, 14vh, 110px);
 }
 
 .eyebrow {
@@ -100,12 +106,23 @@
 }
 
 .hero-copy h1 {
+    position: relative;
     font-family: "Fraunces", serif;
     font-weight: 600;
     font-size: 28px;
     line-height: 1.12;
     margin: 14px 0 18px;
     letter-spacing: 0;
+}
+
+.hero-copy h1::before {
+    content: "";
+    position: absolute;
+    inset: -28px -24px;
+    background: radial-gradient(circle, rgba(245, 192, 122, 0.32), transparent 70%);
+    filter: blur(18px);
+    z-index: -1;
+    pointer-events: none;
 }
 
 .hero-copy p {
