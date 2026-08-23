@@ -542,6 +542,14 @@
 .badge.blue { background: rgba(122,158,189,.18); color: #416985; }
 .badge.terra { background: rgba(193,122,90,.18); color: #9B553D; }
 
+.playdate-status { display: inline-flex; align-items: center; border-radius: 999px; padding: 4px 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.playdate-status.proposed { background: var(--amber); color: var(--charcoal); }
+.playdate-status.confirmed { background: #587354; color: #fff; }
+.playdate-status.cancelled { background: rgba(140,110,110,.16); color: var(--stone); }
+
+.playdate-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.playdate-actions .button { flex: 1; min-width: 0; border-radius: 999px; }
+
 .chip-row { gap: 8px; flex-wrap: wrap; }
 .chip {
     min-height: 40px;

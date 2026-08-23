@@ -1154,6 +1154,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   // for those without reconsidering. "countered" stays in here too — a
   // counter-proposal is still an active negotiation, not a step back from chat.
   const chatAvailable = ["proposed", "confirmed", "rescheduled", "countered"].includes(playdate.status);
+  const statusStyle = playdate.status === "cancelled" ? "cancelled" : ["confirmed", "rescheduled", "completed"].includes(playdate.status) ? "confirmed" : "proposed";
   const showingCounter = playdate.status === "countered" && playdate.counter;
   const displayDate = showingCounter ? playdate.counter.date : playdate.date;
   const displayStart = showingCounter ? playdate.counter.start_time : playdate.start_time;
@@ -1162,7 +1163,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
     <article className="card stack" data-testid={`playdate-card-${playdate.playdate_id}`}>
       <div className="family-head">
         <div>
-          <span className={`badge ${playdate.status === "confirmed" ? "terra" : playdate.status === "completed" ? "sage" : "amber"}`} data-testid={`playdate-status-${playdate.playdate_id}`}>{playdate.status}</span>
+          <span className={`playdate-status ${statusStyle}`} data-testid={`playdate-status-${playdate.playdate_id}`}>{playdate.status}</span>
           <h3 className="card-title" data-testid={`playdate-title-${playdate.playdate_id}`}>{playdate.title}</h3>
         </div>
         <span className="badge blue" data-testid={`playdate-type-${playdate.playdate_id}`}>{playdate.type}</span>
@@ -1171,7 +1172,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
       <p className="muted" data-testid={`playdate-detail-${playdate.playdate_id}`}><CalendarDays size={15} /> {fmtDate(displayDate, { weekday: "long", month: "short", day: "numeric" })} · {timeLabel(displayStart)}–{timeLabel(displayEnd)}</p>
       <p className="muted" data-testid={`playdate-location-${playdate.playdate_id}`}><MapPin size={15} /> {playdate.location} · {playdate.activity}</p>
       <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name?.split(" ")[0] || "Parent"}</span>)}</div>
-      <div className="proposal-actions">
+      <div className="playdate-actions">
         {playdate.status === "proposed" && !isSender && (
           <>
             <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
@@ -1190,7 +1191,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
         {playdate.status === "countered" && sentCounter && (
           <button className="button secondary" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
         )}
-        {chatAvailable && <button className="button secondary" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Open Chat</button>}
+        {chatAvailable && <button className="button blue-outline" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Chat</button>}
         {["confirmed", "rescheduled"].includes(playdate.status) && (
           <>
             <button className="button secondary" onClick={() => setShowReschedule(true)} data-testid={`playdate-reschedule-${playdate.playdate_id}`}>Reschedule</button>
