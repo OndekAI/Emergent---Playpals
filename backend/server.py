@@ -1042,6 +1042,20 @@ async def list_pending_communities(admin: Dict[str, Any] = Depends(require_admin
     return {"communities": visible}
 
 
+@api_router.get("/admin/communities/approved")
+async def list_approved_communities(admin: Dict[str, Any] = Depends(require_admin)):
+    masters = await db.communities.find({"status": "active", "master_community_id": None}, {"_id": 0}).sort("name", 1).to_list(200)
+    result = []
+    for master in masters:
+        master["member_count"] = await db.community_members.count_documents({"community_id": master["community_id"], "status": "active"})
+        subs = await db.communities.find({"master_community_id": master["community_id"], "status": "active"}, {"_id": 0}).sort("name", 1).to_list(100)
+        for sub in subs:
+            sub["member_count"] = await db.community_members.count_documents({"community_id": sub["community_id"], "status": "active"})
+        master["subs"] = subs
+        result.append(master)
+    return result
+
+
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
     # Silent bookkeeping only: a grade member should also hold an active
     # membership in the grade's master (school) community, even though there's

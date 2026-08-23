@@ -1469,6 +1469,7 @@ function ProfilePage({ user, dashboard, refresh }) {
         </section>
         <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email {user?.notification_preferences?.email ? "on" : "off"}</span><span className="badge blue">Push {user?.notification_preferences?.push ? "on" : "off"}</span><span className="badge amber">SMS {user?.notification_preferences?.sms ? "on" : "off"}</span></div></section>
         {user?.is_admin && <AdminPendingCommunities />}
+        {user?.is_admin && <AdminApprovedCommunities />}
         <button className="button secondary" onClick={logout} data-testid="logout-button">Log out</button>
       </div>
       {showChild && <ChildModal onClose={() => setShowChild(false)} refresh={refresh} />}
@@ -1593,6 +1594,55 @@ function AdminPendingCommunities() {
           </section>
         </div>
       )}
+    </section>
+  );
+}
+
+function AdminApprovedCommunities() {
+  const [approved, setApproved] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [copiedId, setCopiedId] = useState(null);
+
+  useEffect(() => {
+    api("/admin/communities/approved")
+      .then(setApproved)
+      .catch(() => setApproved([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const copyLink = (id, slug) => {
+    navigator.clipboard.writeText(`${window.location.origin}/join/${slug}`);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  if (loading || !approved.length) return null;
+
+  return (
+    <section className="card stack" data-testid="admin-approved-communities-card">
+      <h2 className="card-title" data-testid="admin-approved-communities-title">Approved communities</h2>
+      {approved.map((master) => (
+        <div className="stack" style={{ gap: 6 }} key={master.community_id} data-testid={`admin-approved-group-${master.community_id}`}>
+          <div className="mini-card family-head">
+            <div><strong data-testid={`admin-approved-name-${master.community_id}`}>{master.name}</strong><p className="muted">{master.city || ""} · {master.member_count} members</p></div>
+            <button className="button small secondary" onClick={() => copyLink(master.community_id, master.join_slug)} data-testid={`admin-approved-copy-${master.community_id}`}>
+              {copiedId === master.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
+            </button>
+          </div>
+          {master.subs?.length > 0 && (
+            <div className="stack" style={{ gap: 6, marginLeft: 20 }} data-testid={`admin-approved-subs-${master.community_id}`}>
+              {master.subs.map((sub) => (
+                <div className="mini-card family-head" key={sub.community_id} data-testid={`admin-approved-sub-${sub.community_id}`}>
+                  <div><strong>{sub.name}</strong><p className="muted">{sub.member_count} members</p></div>
+                  <button className="button small secondary" onClick={() => copyLink(sub.community_id, sub.join_slug)} data-testid={`admin-approved-sub-copy-${sub.community_id}`}>
+                    {copiedId === sub.community_id ? <><Check size={15} /> Copied</> : "Copy link"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
     </section>
   );
 }
