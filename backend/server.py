@@ -1562,12 +1562,18 @@ async def reschedule_playdate(playdate_id: str, payload: RescheduleRequest, user
     playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
     if not playdate:
         raise HTTPException(status_code=404, detail="Playdate not found")
+    participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
+    if not participant:
+        raise HTTPException(status_code=403, detail="Not a participant")
     if playdate.get("reschedule_rounds", 0) >= 3:
         raise HTTPException(status_code=400, detail="This one seems tricky — want to cancel and try a fresh date?")
-    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"date": payload.date, "start_time": payload.start_time, "end_time": payload.end_time, "status": "rescheduled"}, "$inc": {"reschedule_rounds": 1}})
-    participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
-    for participant in participants:
-        await notify_parent(participant["parent_id"], "Reschedule request", f"{user['name']} suggested a new time for {playdate['activity']}.", "playdate", playdate_id)
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
+        "status": "countered",
+        "counter": {"date": payload.date, "start_time": payload.start_time, "end_time": payload.end_time, "from_parent_id": user["user_id"], "created_at": now_iso()},
+    }, "$inc": {"reschedule_rounds": 1}})
+    others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+    for other in others:
+        await notify_parent(other["parent_id"], "Reschedule request", f"{user['name']} suggested a new time for {playdate['activity']}.", "playdate", playdate_id)
     return {"ok": True}
 
 

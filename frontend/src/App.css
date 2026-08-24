@@ -628,7 +628,7 @@
     align-items: center;
     justify-content: space-between;
     position: sticky;
-    top: -12px;
+    top: 0;
     margin: -12px -20px 14px;
     padding: 12px 20px 10px;
     background: #fff;
