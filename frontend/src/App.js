@@ -428,7 +428,7 @@ function MatchCard({ match, onPropose, onDismiss }) {
         <span className="muted">Both enjoy:</span>
         <div className="chip-row" data-testid={`match-interests-${match.match_id}`}>{(shared.length ? shared : (childB.interests || []).slice(0, 3)).map((interest) => <span className="interest-pill" key={interest}>{interest}</span>)}</div>
       </div>
-      <p data-testid={`match-time-${match.match_id}`}><CalendarDays size={15} /> {fmtDate(match.date, { weekday: "long" })} · {timeLabel(match.start_time)}–{timeLabel(match.end_time)}</p>
+      <p data-testid={`match-time-${match.match_id}`}><CalendarDays size={15} /> {fmtDate(match.date, { weekday: "short", month: "short", day: "numeric" })} · {timeLabel(match.start_time)}–{timeLabel(match.end_time)}</p>
       <span className="overlap-pill" data-testid={`match-overlap-${match.match_id}`}>{match.duration_minutes}+ min overlap</span>
       <button className="button primary" onClick={onPropose} data-testid={`match-propose-${match.match_id}`}>Propose Playdate →</button>
       <div className="match-links"><button onClick={() => onDismiss(match, "not_this_week")} data-testid={`match-not-this-week-${match.match_id}`}>Not this week</button><span>|</span><button className="danger-link" onClick={() => onDismiss(match, "dont_suggest_again")} data-testid={`match-dont-suggest-${match.match_id}`}>Don't suggest again</button></div>

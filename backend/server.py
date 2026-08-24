@@ -1462,23 +1462,32 @@ async def community_members(user: Dict[str, Any] = Depends(current_user)):
     return members
 
 
+def merge_blocks_by_date(slots: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, str]]]:
+    by_date = {}
+    for slot in slots:
+        blocks = by_date.setdefault(slot["date"], [])
+        for block in slot.get("blocks", []):
+            if block not in blocks:
+                blocks.append(block)
+    return by_date
+
+
 async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     own_slots = await db.availability_slots.find({"parent_id": parent_id, "date": {"$gte": date.today().isoformat()}, "is_paused": False}, {"_id": 0}).to_list(500)
     if not own_slots:
         return []
     peers = await common_community_parent_ids(parent_id)
     matches = []
-    own_by_date = {}
-    for slot in own_slots:
-        own_by_date.setdefault(slot["date"], []).extend(slot.get("blocks", []))
+    own_by_date = merge_blocks_by_date(own_slots)
     for peer_id in peers:
         if await match_pair_suppressed(parent_id, peer_id):
             continue
         raw_peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
-        peer_slots = await visible_slots_for_viewer(raw_peer_slots, parent_id, peer_id)
-        for slot in peer_slots:
-            for own_block in own_by_date.get(slot["date"], []):
-                for peer_block in slot.get("blocks", []):
+        visible_peer_slots = await visible_slots_for_viewer(raw_peer_slots, parent_id, peer_id)
+        peer_by_date = merge_blocks_by_date(visible_peer_slots)
+        for slot_date, peer_blocks in peer_by_date.items():
+            for own_block in own_by_date.get(slot_date, []):
+                for peer_block in peer_blocks:
                     start = max(minutes(own_block["start"]), minutes(peer_block["start"]))
                     end = min(minutes(own_block["end"]), minutes(peer_block["end"]))
                     if end - start >= 90:
@@ -1488,19 +1497,28 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
                         interest_overlap = len(set((peer_children[0].get("interests", []) if peer_children else [])) & set((own_children[0].get("interests", []) if own_children else [])))
                         score = min(96, 55 + min(25, int((end - start - 90) / 3)) + interest_overlap * 6)
                         matches.append({
-                            "match_id": f"match_{peer_id}_{slot['date']}_{start}",
+                            "match_id": f"match_{peer_id}_{slot_date}_{start}",
                             "parent": parent,
                             "children": peer_children,
                             "own_children": own_children,
-                            "date": slot["date"],
+                            "date": slot_date,
                             "start_time": f"{start // 60:02d}:{start % 60:02d}",
                             "end_time": f"{end // 60:02d}:{end % 60:02d}",
                             "duration_minutes": end - start,
                             "score": score,
                             "score_label": "Great match" if score >= 80 else "Good overlap",
                         })
-    matches.sort(key=lambda row: row["duration_minutes"], reverse=True)
-    return matches[:8]
+    matches.sort(key=lambda row: row["date"])
+    collapsed = []
+    seen_patterns = set()
+    for m in matches:
+        pattern_key = (m["parent"]["user_id"], m["start_time"], m["end_time"])
+        if pattern_key in seen_patterns:
+            continue
+        seen_patterns.add(pattern_key)
+        collapsed.append(m)
+    collapsed.sort(key=lambda row: row["duration_minutes"], reverse=True)
+    return collapsed[:8]
 
 
 async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
