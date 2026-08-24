@@ -256,9 +256,11 @@ function AppLayout({ title, user, children }) {
   );
 }
 
-function Protected({ authed, loading, children }) {
+function Protected({ authed, loading, needsWelcome, children }) {
+  const location = useLocation();
   if (loading) return <LoadingScreen />;
   if (!authed) return <Navigate to="/login" replace />;
+  if (needsWelcome && location.pathname !== "/welcome") return <Navigate to="/welcome" replace />;
   return children;
 }
 
@@ -419,12 +421,13 @@ function SponsorRequestCard({ request, onResponded }) {
   );
 }
 
-function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
+function AvailabilitySheet({ selectedDate, availability, onClose, onSaved, children }) {
   const existing = availability.find((slot) => slot.date === isoDate(selectedDate));
   const [blocks, setBlocks] = useState(existing?.blocks?.length ? existing.blocks : [{ start: "15:00", end: "17:00" }]);
   const [recurrence, setRecurrence] = useState("weekly");
   const [visibilityMode, setVisibilityMode] = useState(existing?.visibility_mode || "everyone");
   const [manualIds, setManualIds] = useState(existing?.visible_to_parent_ids || []);
+  const [selectedChildIds, setSelectedChildIds] = useState(existing?.child_ids || []);
   const [members, setMembers] = useState([]);
   const [membersLoading, setMembersLoading] = useState(true);
   useEffect(() => {
@@ -435,6 +438,9 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
   }, []);
   const toggleManual = (parentId) => {
     setManualIds((prev) => prev.includes(parentId) ? prev.filter((id) => id !== parentId) : [...prev, parentId]);
+  };
+  const toggleChild = (childId) => {
+    setSelectedChildIds((prev) => prev.includes(childId) ? prev.filter((id) => id !== childId) : [...prev, childId]);
   };
   const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
@@ -454,7 +460,7 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
 
   const save = async () => {
     try {
-      await api("/availability", { method: "POST", body: JSON.stringify({ date: isoDate(selectedDate), blocks, recurrence, visibility_mode: visibilityMode, visible_to_parent_ids: manualIds }) });
+      await api("/availability", { method: "POST", body: JSON.stringify({ date: isoDate(selectedDate), blocks, recurrence, visibility_mode: visibilityMode, visible_to_parent_ids: manualIds, child_ids: selectedChildIds }) });
       toast.success("Availability saved");
       await onSaved();
       onClose();
@@ -509,6 +515,24 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved }) {
               <button className={`radio-pill ${recurrence === "once" ? "active" : ""}`} onClick={() => setRecurrence("once")} data-testid="availability-once-button">Just this once</button>
               <button className={`radio-pill ${recurrence === "weekly" ? "active" : ""}`} onClick={() => setRecurrence("weekly")} data-testid="availability-weekly-button">Every {dayName}</button>
             </div>
+            {children.length > 1 && (
+              <section className="stack" data-testid="availability-child-section">
+                <h4 className="section-label">WHOSE AVAILABILITY?</h4>
+                <div className="radio-pills">
+                  <button className={`radio-pill ${selectedChildIds.length === 0 ? "active" : ""}`} onClick={() => setSelectedChildIds([])} data-testid="availability-child-all-button">All kids</button>
+                  {children.map((child) => (
+                    <button
+                      key={child.child_id}
+                      className={`radio-pill ${selectedChildIds.includes(child.child_id) ? "active" : ""}`}
+                      onClick={() => toggleChild(child.child_id)}
+                      data-testid={`availability-child-${child.child_id}-button`}
+                    >
+                      {child.first_name}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
             <section className="stack" data-testid="availability-visibility-section">
               <h4 className="section-label">WHO CAN SEE THIS?</h4>
               <div className="visibility-options">
@@ -616,7 +640,7 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate }) {
         <span className="row" style={{ gap: 6 }} data-testid="legend-pending"><span className="dot amber" style={{ width: 10, height: 10 }} />Pending proposal</span>
         <span className="row" style={{ gap: 6 }} data-testid="legend-confirmed"><span className="dot terra" style={{ width: 10, height: 10 }} />Confirmed playdate</span>
       </div>
-      {selectedDate && <AvailabilitySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} />}
+      {selectedDate && <AvailabilitySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} />}
     </section>
   );
 }
@@ -1816,6 +1840,76 @@ function ChildModal({ child, onClose, refresh }) {
   );
 }
 
+function WelcomeScreen({ user, dashboard, refresh }) {
+  const navigate = useNavigate();
+  const firstChild = dashboard?.children?.[0];
+  const community = dashboard?.communities?.find((c) => !c.master_community_id) || dashboard?.communities?.[0];
+  const [allergies, setAllergies] = useState(firstChild?.allergies || "");
+  const [interests, setInterests] = useState(firstChild?.interests || []);
+  const [saving, setSaving] = useState(false);
+
+  const toggleInterest = (interest) => setInterests((prev) => prev.includes(interest) ? prev.filter((i) => i !== interest) : [...prev, interest]);
+
+  const submit = async () => {
+    setSaving(true);
+    try {
+      if (firstChild) {
+        await api(`/children/${firstChild.child_id}`, { method: "PUT", body: JSON.stringify({ allergies, interests }) });
+      }
+      await api("/profile", { method: "PUT", body: JSON.stringify({ needs_welcome: false }) });
+      await refresh();
+      navigate("/home", { replace: true });
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="slide-screen" data-testid="welcome-screen">
+      <Header title="Welcome" user={user} />
+      <main className="main-content stack">
+        <section className="card stack" data-testid="welcome-intro-card">
+          <h1 className="section-title">Welcome to PlayPals!</h1>
+          <p className="muted" data-testid="welcome-message">
+            {firstChild
+              ? `We've added ${firstChild.first_name} (${firstChild.grade}) to ${community?.name || "your community"}.`
+              : `We've added you to ${community?.name || "your community"}.`}
+          </p>
+        </section>
+        {firstChild && (
+          <section className="card stack" data-testid="welcome-child-card">
+            <h2 className="section-title">A couple quick details</h2>
+            <input
+              className="input"
+              value={allergies}
+              onChange={(e) => setAllergies(e.target.value)}
+              placeholder="Allergies / dietary restrictions"
+              data-testid="welcome-allergies-input"
+            />
+            <div className="chip-row" data-testid="welcome-interest-options">
+              {INTERESTS.map((interest) => (
+                <button
+                  key={interest}
+                  className={`chip ${interests.includes(interest) ? "active" : ""}`}
+                  onClick={() => toggleInterest(interest)}
+                  data-testid={`welcome-interest-${interest.toLowerCase()}-button`}
+                >
+                  {interest}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+        <button className="button primary" onClick={submit} disabled={saving} data-testid="welcome-continue-button">
+          {saving ? "Saving…" : "Continue"}
+        </button>
+      </main>
+    </div>
+  );
+}
+
 function AppRouter() {
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(null);
@@ -1843,16 +1937,18 @@ function AppRouter() {
 
   if (location.hash?.includes("session_id=") || location.hash?.includes("token=")) return <AuthCallback refresh={refresh} />;
   const authed = Boolean(user);
+  const needsWelcome = authed && dashboard?.parent?.needs_welcome;
 
   return (
     <Routes>
       <Route path="/login" element={authed ? <Navigate to="/home" replace /> : <LoginScreen />} />
       <Route path="/auth/magic" element={<AuthCallback refresh={refresh} />} />
-      <Route path="/home" element={<Protected authed={authed} loading={loading}><HomePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
-      <Route path="/playdates" element={<Protected authed={authed} loading={loading}><PlaydatesPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
-      <Route path="/community" element={<Protected authed={authed} loading={loading}><CommunityPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/welcome" element={<Protected authed={authed} loading={loading}><WelcomeScreen user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/home" element={<Protected authed={authed} loading={loading} needsWelcome={needsWelcome}><HomePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/playdates" element={<Protected authed={authed} loading={loading} needsWelcome={needsWelcome}><PlaydatesPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/community" element={<Protected authed={authed} loading={loading} needsWelcome={needsWelcome}><CommunityPage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/join/:slug" element={<JoinLinkGate authed={authed} loading={loading}><JoinViaLinkScreen user={user} refresh={refresh} /></JoinLinkGate>} />
-      <Route path="/profile" element={<Protected authed={authed} loading={loading}><ProfilePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
+      <Route path="/profile" element={<Protected authed={authed} loading={loading} needsWelcome={needsWelcome}><ProfilePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="*" element={<Navigate to={authed ? "/home" : "/login"} replace />} />
     </Routes>
   );

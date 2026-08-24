@@ -92,6 +92,7 @@ class AvailabilityCreate(BaseModel):
     recurrence: str = "once"
     visibility_mode: str = "everyone"
     visible_to_parent_ids: List[str] = []
+    child_ids: List[str] = []
 
 
 class CommunityCheckRequest(BaseModel):
@@ -196,6 +197,7 @@ class ParentProfileUpdate(BaseModel):
     neighborhood: Optional[str] = None
     contact_preference: Optional[str] = None
     notification_preferences: Optional[Dict[str, bool]] = None
+    needs_welcome: Optional[bool] = None
 
 
 class SponsorResponse(BaseModel):
@@ -829,6 +831,7 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
             "is_paused": False,
             "visibility_mode": payload.visibility_mode,
             "visible_to_parent_ids": payload.visible_to_parent_ids if payload.visibility_mode == "manual" else [],
+            "child_ids": payload.child_ids,
             "created_at": now_iso(),
         }
         await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat()})
@@ -1104,6 +1107,7 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
         "notification_preferences": {"email": True, "push": True, "sms": False},
         "phone": "",
         "status": "pre_added",
+        "needs_welcome": True,
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
