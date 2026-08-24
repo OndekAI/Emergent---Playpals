@@ -145,8 +145,7 @@ class TagSponsorRequest(BaseModel):
 
 
 class PlaydateCreate(BaseModel):
-    type: str = "1:1"
-    invitee_parent_ids: List[str]
+    invitee_parent_id: str
     child_ids: List[str] = []
     date: str
     start_time: str
@@ -154,7 +153,6 @@ class PlaydateCreate(BaseModel):
     location: str
     activity: str
     notes: str = ""
-    min_confirmations: int = 1
     title: Optional[str] = None
     slot_id: Optional[str] = None
 
@@ -209,11 +207,6 @@ class SponsorResponse(BaseModel):
 class StepBackRequest(BaseModel):
     reason: str
     duration: Optional[str] = None
-
-
-class VisibilityUpdate(BaseModel):
-    visibility_mode: str
-    visible_to_parent_ids: List[str] = []
 
 
 class AvailabilityShareRequestCreate(BaseModel):
@@ -431,7 +424,7 @@ async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
     ids = [row["playdate_id"] for row in rows_b]
     if not ids:
         return False
-    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered"]}})
+    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered", "declined", "withdrawn", "reschedule_pending", "expired"]}})
     return count > 0
 
 
@@ -629,7 +622,7 @@ async def ensure_global_seed() -> None:
         for community_id in ["comm_mulgrave", grade_id]:
             await db.community_members.update_one(
                 {"community_id": community_id, "parent_id": user_id},
-                {"$setOnInsert": {"membership_id": new_id("member"), "community_id": community_id, "parent_id": user_id, "status": "active", "sponsor_id": "playpals", "availability_visibility_mode": "everyone", "joined_at": now_iso(), "provisional_expires_at": None}},
+                {"$setOnInsert": {"membership_id": new_id("member"), "community_id": community_id, "parent_id": user_id, "status": "active", "sponsor_id": "playpals", "joined_at": now_iso(), "provisional_expires_at": None}},
                 upsert=True,
             )
         slot_date = upcoming[(idx * 2 + 2) % len(upcoming)]
@@ -1065,7 +1058,7 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
                 "created_at": now_iso(),
             })
     if is_admin:
-        await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if payload.type in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
+        await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "joined_at": now_iso(), "provisional_expires_at": None})
         await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
     return {"created": True, "community": community, "duplicate_check": duplicate}
 
@@ -1084,7 +1077,7 @@ async def approve_community(community_id: str, admin: Dict[str, Any] = Depends(r
     if creator_id:
         existing_membership = await db.community_members.find_one({"community_id": community_id, "parent_id": creator_id}, {"_id": 0})
         if not existing_membership:
-            await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community_id, "parent_id": creator_id, "status": "active", "sponsor_id": None, "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only", "joined_at": now_iso(), "provisional_expires_at": None})
+            await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community_id, "parent_id": creator_id, "status": "active", "sponsor_id": None, "joined_at": now_iso(), "provisional_expires_at": None})
             await add_credit(creator_id, 5, "community_creator", community_id)
         await notify_parent(creator_id, "Community approved", f"{community['name']} is now live!", "community", community_id)
     updated = await db.communities.find_one({"community_id": community_id}, {"_id": 0})
@@ -1198,7 +1191,6 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
             "parent_id": user["user_id"],
             "status": "active",
             "sponsor_id": None,
-            "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only",
             "joined_at": now_iso(),
             "provisional_expires_at": None,
         })
@@ -1250,7 +1242,6 @@ async def ensure_master_membership(community: Dict[str, Any], parent_id: str) ->
         "status": "active",
         "sponsor_id": None,
         "class_or_teacher": None,
-        "availability_visibility_mode": "everyone" if master.get("type") in ["school", "grade", "extracurricular"] else "request_only",
         "joined_at": now_iso(),
         "provisional_expires_at": None,
     })
@@ -1272,7 +1263,6 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
         "status": "active",
         "sponsor_id": None,
         "class_or_teacher": payload.class_or_teacher,
-        "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only",
         "joined_at": now_iso(),
         "provisional_expires_at": None,
     }
@@ -1316,16 +1306,6 @@ async def step_back_community(community_id: str, payload: StepBackRequest, user:
     return {"status": status, "message": f"You've stepped back from {community['name']}. Your history and credits are safe. 💛"}
 
 
-@api_router.put("/communities/{community_id}/visibility")
-async def update_community_visibility(community_id: str, payload: VisibilityUpdate, user: Dict[str, Any] = Depends(current_user)):
-    if payload.visibility_mode not in ["everyone", "manual", "request_only"]:
-        raise HTTPException(status_code=400, detail="Invalid visibility mode")
-    result = await db.community_members.update_one({"community_id": community_id, "parent_id": user["user_id"]}, {"$set": {"availability_visibility_mode": payload.visibility_mode, "visible_to_parent_ids": payload.visible_to_parent_ids, "updated_at": now_iso()}})
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Membership not found")
-    return {"ok": True}
-
-
 @api_router.post("/availability-share-requests")
 async def request_availability_share(payload: AvailabilityShareRequestCreate, user: Dict[str, Any] = Depends(current_user)):
     if payload.target_parent_id == user["user_id"]:
@@ -1333,15 +1313,9 @@ async def request_availability_share(payload: AvailabilityShareRequestCreate, us
     existing = await db.availability_share_requests.find_one({"requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "status": {"$in": ["pending", "approved"]}}, {"_id": 0})
     if existing:
         return existing
-    target_membership = await db.community_members.find_one({"parent_id": payload.target_parent_id, "availability_visibility_mode": "everyone"}, {"_id": 0})
-    status = "approved" if target_membership else "pending"
-    request_doc = {"request_id": new_id("share"), "requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "community_id": payload.community_id, "status": status, "created_at": now_iso(), "responded_at": now_iso() if status == "approved" else None}
+    request_doc = {"request_id": new_id("share"), "requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "community_id": payload.community_id, "status": "pending", "created_at": now_iso(), "responded_at": None}
     await db.availability_share_requests.insert_one(request_doc.copy())
-    if status == "approved":
-        await add_credit(user["user_id"], 1, "availability_share", payload.target_parent_id)
-        await add_credit(payload.target_parent_id, 1, "availability_share", user["user_id"])
-    else:
-        await notify_parent(payload.target_parent_id, "Availability share request", f"{user['name']} wants to share availability with you", "availability_share", request_doc["request_id"])
+    await notify_parent(payload.target_parent_id, "Availability share request", f"{user['name']} wants to share availability with you", "availability_share", request_doc["request_id"])
     return request_doc
 
 
@@ -1545,12 +1519,20 @@ async def list_playdates(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.post("/playdates")
 async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depends(current_user)):
+    # Idempotency guard (1.2): a resubmit of the same proposal within a short window
+    # returns the already-created playdate instead of creating a duplicate.
+    if payload.slot_id:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+        recent = await db.playdates.find_one({"organizer_id": user["user_id"], "slot_id": payload.slot_id, "created_at": {"$gte": cutoff}}, {"_id": 0})
+        if recent:
+            return {"playdate": recent}
     playdate_id = new_id("playdate")
-    title = payload.title or ("Group Playdate" if payload.type == "group" else "1:1 Playdate")
+    title = payload.title or "1:1 Playdate"
     playdate = {
         "playdate_id": playdate_id,
-        "type": payload.type,
+        "type": "1:1",
         "organizer_id": user["user_id"],
+        "slot_id": payload.slot_id,
         "title": title,
         "date": payload.date,
         "start_time": payload.start_time,
@@ -1559,7 +1541,6 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         "activity": payload.activity,
         "notes": payload.notes,
         "status": "proposed",
-        "min_confirmations": payload.min_confirmations,
         "cancellation_reason": None,
         "reschedule_rounds": 0,
         "created_at": now_iso(),
@@ -1567,14 +1548,12 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
     await db.playdates.insert_one(playdate.copy())
     if payload.slot_id:
         slot = await db.availability_slots.find_one({"slot_id": payload.slot_id}, {"_id": 0})
-        if slot and slot["parent_id"] in payload.invitee_parent_ids:
+        if slot and slot["parent_id"] == payload.invitee_parent_id:
             await db.availability_slots.update_one({"slot_id": payload.slot_id}, {"$set": {"status": "held", "proposal_id": playdate_id, "ever_held": True}})
-    for invitee in payload.invitee_parent_ids:
-        await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": invitee, "dismissal_type": "dont_suggest_again"})
+    await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": payload.invitee_parent_id, "dismissal_type": "dont_suggest_again"})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
-    for invitee in payload.invitee_parent_ids[:6]:
-        await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": invitee, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
-        await notify_parent(invitee, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
+    await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": payload.invitee_parent_id, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
+    await notify_parent(payload.invitee_parent_id, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
     return {"playdate": playdate}
 
 
@@ -1587,7 +1566,7 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
     if not participant:
         raise HTTPException(status_code=403, detail="Not a participant")
     if payload.action == "accept":
-        if playdate.get("status") == "countered" and playdate.get("counter"):
+        if playdate.get("status") in ("countered", "reschedule_pending") and playdate.get("counter"):
             counter = playdate["counter"]
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": counter["from_parent_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
@@ -1601,16 +1580,29 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         else:
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
-            if accepted >= max(2, playdate.get("min_confirmations", 1)):
+            if accepted >= 2:
                 await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
                 await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
     elif payload.action == "decline":
+        # NOTE (logged, not fixed this phase): when status is reschedule_pending, this
+        # terminally declines the whole playdate rather than reverting to the prior
+        # confirmed time. Revisit once reschedule_pending has its own decline semantics.
         await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled"}})
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "declined"}})
         await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
             await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
+    elif payload.action == "withdraw":
+        if user["user_id"] != playdate["organizer_id"]:
+            raise HTTPException(status_code=403, detail="Only the sender can withdraw a proposal")
+        if playdate.get("status") not in ("proposed", "countered"):
+            raise HTTPException(status_code=400, detail="This proposal can no longer be withdrawn")
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "withdrawn"}})
+        await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
+        others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+        for other in others:
+            await notify_parent(other["parent_id"], "Proposal withdrawn", f"{user['name']} withdrew the {playdate['activity']} proposal.", "playdate", playdate_id)
     elif payload.action == "counter":
         await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "countered", "counter": {"date": payload.counter_date, "start_time": payload.counter_start_time, "end_time": payload.counter_end_time, "from_parent_id": user["user_id"], "created_at": now_iso()}}})
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
@@ -1630,7 +1622,7 @@ async def reschedule_playdate(playdate_id: str, payload: RescheduleRequest, user
     if playdate.get("reschedule_rounds", 0) >= 3:
         raise HTTPException(status_code=400, detail="This one seems tricky — want to cancel and try a fresh date?")
     await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
-        "status": "countered",
+        "status": "reschedule_pending",
         "counter": {"date": payload.date, "start_time": payload.start_time, "end_time": payload.end_time, "from_parent_id": user["user_id"], "created_at": now_iso()},
     }, "$inc": {"reschedule_rounds": 1}})
     others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
@@ -1698,7 +1690,7 @@ async def send_message(playdate_id: str, payload: ChatMessageCreate, user: Dict[
     # Chat is available as soon as a proposal exists (sender + receiver), not just
     # after Accept/Confirm — matches the frontend's chatAvailable logic in App.js
     # (PlaydateCard). See Playdate_Card_Actions_Spec_2026-08-23.md for the decision.
-    if playdate["status"] not in ["proposed", "confirmed", "rescheduled", "countered"]:
+    if playdate["status"] not in ["proposed", "confirmed", "rescheduled", "countered", "reschedule_pending"]:
         raise HTTPException(status_code=400, detail="Chat is not available for this playdate")
     message = {"message_id": new_id("msg"), "playdate_id": playdate_id, "sender_id": user["user_id"], "sender_name": user["name"], "content": payload.content, "created_at": now_iso(), "read_at": None}
     await db.messages.insert_one(message.copy())

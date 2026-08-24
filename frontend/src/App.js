@@ -976,6 +976,7 @@ function ActivityCard({ note }) {
 function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const [location, setLocation] = useState("Neighborhood park");
   const [activity, setActivity] = useState(ACTIVITIES[0]);
+  const [sending, setSending] = useState(false);
   const selected = match
     ? { parentId: match.parent.user_id, parentName: match.parent.name, childName: match.children?.[0]?.first_name, childId: match.children?.[0]?.child_id, date: match.date, blocks: [{ start: match.start_time, end: match.end_time }] }
     : row
@@ -986,12 +987,13 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const hasOwnOpenSlot = (dashboard?.availability || []).some((s) => !s.is_paused && s.date >= today && (!s.child_ids?.length || s.child_ids.includes(ownChild?.child_id)));
 
   const submit = async () => {
+    if (sending) return;
+    setSending(true);
     try {
       await api("/playdates", {
         method: "POST",
         body: JSON.stringify({
-          type: "1:1",
-          invitee_parent_ids: [selected.parentId],
+          invitee_parent_id: selected.parentId,
           child_ids: ownChild ? [ownChild.child_id] : [],
           date: selected.date,
           start_time: selected.blocks[0].start,
@@ -999,7 +1001,6 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
           location,
           activity,
           notes: "",
-          min_confirmations: 1,
           title: `${ownChild?.first_name || "PlayPal"} + ${selected.childName || "friend"}`,
           slot_id: selected.slotId || null,
         }),
@@ -1009,6 +1010,7 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
       onClose();
     } catch (error) {
       toast.error(error.message);
+      setSending(false);
     }
   };
 
@@ -1038,7 +1040,7 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
             <div><strong>{selected.parentName} can't reach you back yet.</strong> Add {ownChild?.first_name || "your child"}'s open time so families can propose to you too.</div>
           </div>
         )}
-        <button className="button primary" onClick={submit} data-testid="proposal-send-button"><Send size={18} /> Send proposal</button>
+        <button className="button primary" onClick={submit} disabled={sending} data-testid="proposal-send-button"><Send size={18} /> {sending ? "Sending…" : "Send proposal"}</button>
       </section>
     </div>
   );
@@ -1535,9 +1537,9 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   // different surface and may need stricter chat gating — don't reuse this flag
   // for those without reconsidering. "countered" stays in here too — a
   // counter-proposal is still an active negotiation, not a step back from chat.
-  const chatAvailable = ["proposed", "confirmed", "rescheduled", "countered"].includes(playdate.status);
+  const chatAvailable = ["proposed", "confirmed", "rescheduled", "countered", "reschedule_pending"].includes(playdate.status);
   const statusStyle = playdate.status === "cancelled" ? "cancelled" : ["confirmed", "rescheduled", "completed"].includes(playdate.status) ? "confirmed" : "proposed";
-  const showingCounter = playdate.status === "countered" && playdate.counter;
+  const showingCounter = ["countered", "reschedule_pending"].includes(playdate.status) && playdate.counter;
   const displayDate = showingCounter ? playdate.counter.date : playdate.date;
   const displayStart = showingCounter ? playdate.counter.start_time : playdate.start_time;
   const displayEnd = showingCounter ? playdate.counter.end_time : playdate.end_time;
@@ -1562,15 +1564,15 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
           </>
         )}
         {playdate.status === "proposed" && isSender && (
-          <button className="button secondary" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
+          <button className="button secondary" onClick={() => respond("withdraw")} data-testid={`playdate-withdraw-${playdate.playdate_id}`}>Withdraw</button>
         )}
-        {playdate.status === "countered" && !sentCounter && (
+        {["countered", "reschedule_pending"].includes(playdate.status) && !sentCounter && (
           <>
             <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
             <button className="button secondary" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
           </>
         )}
-        {playdate.status === "countered" && sentCounter && (
+        {["countered", "reschedule_pending"].includes(playdate.status) && sentCounter && (
           <button className="button secondary" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
         )}
         {chatAvailable && <button className="button blue-outline" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Chat</button>}
