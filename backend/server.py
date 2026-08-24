@@ -482,6 +482,22 @@ async def families_are_sharing(parent_a: str, parent_b: str) -> bool:
     return bool(share)
 
 
+async def share_status_between(viewer_id: str, other_id: str) -> str:
+    share = await db.availability_share_requests.find_one({
+        "$or": [
+            {"requester_parent_id": viewer_id, "target_parent_id": other_id},
+            {"requester_parent_id": other_id, "target_parent_id": viewer_id},
+        ]
+    }, {"_id": 0}, sort=[("created_at", -1)])
+    if not share:
+        return "none"
+    if share["status"] == "approved":
+        return "approved"
+    if share["status"] == "pending":
+        return "pending_sent" if share["requester_parent_id"] == viewer_id else "pending_received"
+    return "none"
+
+
 async def visible_slots_for_viewer(slots: List[Dict[str, Any]], viewer_id: str, owner_id: str) -> List[Dict[str, Any]]:
     visible = []
     sharing = None
@@ -971,7 +987,7 @@ async def community_detail(community_id: str, user: Dict[str, Any] = Depends(cur
             children = await children_for_parent(row["parent_id"])
             if parent:
                 parent["children"] = children
-                parent["sharing"] = await families_are_sharing(user["user_id"], row["parent_id"])
+                parent["share_status"] = await share_status_between(user["user_id"], row["parent_id"])
                 members.append(parent)
     community["member_count"] = await db.community_members.count_documents({"community_id": community_id})
     return {"community": community, "membership": membership, "grades": grade_rows, "other": other_rows, "members": members}

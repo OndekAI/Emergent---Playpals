@@ -1168,18 +1168,33 @@ function StepBackSheet({ community, onClose, refreshAll }) {
 }
 
 function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, onClose, user }) {
+  const [activeId, setActiveId] = useState(communityId);
+  const [history, setHistory] = useState([]);
   const [detail, setDetail] = useState(null);
   const [proposal, setProposal] = useState(proposalMatch ? { match: proposalMatch } : null);
   const [copiedId, setCopiedId] = useState(null);
   const [addingGrade, setAddingGrade] = useState(false);
   const [newGradeName, setNewGradeName] = useState("");
+  useEffect(() => { setActiveId(communityId); setHistory([]); }, [communityId]);
   const load = useCallback(async () => {
-    if (!communityId && proposalMatch) return;
-    try { setDetail(await api(`/communities/${communityId}`)); } catch (error) { toast.error(error.message); }
-  }, [communityId, proposalMatch]);
+    if (!activeId && proposalMatch) return;
+    try { setDetail(await api(`/communities/${activeId}`)); } catch (error) { toast.error(error.message); }
+  }, [activeId, proposalMatch]);
   useEffect(() => { load(); }, [load]);
   const loading = !detail && !proposalMatch;
   const community = detail?.community || proposalMatch?.parent || {};
+  const viewGrade = (gradeId) => {
+    setHistory((prev) => [...prev, activeId]);
+    setActiveId(gradeId);
+  };
+  const goBack = () => {
+    if (history.length) {
+      setActiveId(history[history.length - 1]);
+      setHistory((prev) => prev.slice(0, -1));
+    } else {
+      onClose();
+    }
+  };
   const join = async (id) => {
     try {
       const result = await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: id }) });
@@ -1196,7 +1211,7 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
   const addGrade = async () => {
     if (!newGradeName.trim()) return;
     try {
-      const response = await api(`/communities/${communityId}/add-sub`, { method: "POST", body: JSON.stringify({ name: newGradeName.trim() }) });
+      const response = await api(`/communities/${activeId}/add-sub`, { method: "POST", body: JSON.stringify({ name: newGradeName.trim() }) });
       toast.success(response.community?.status === "pending_approval" ? "Request sent — you'll be notified when it's approved" : `${newGradeName.trim()} added`);
       setAddingGrade(false);
       setNewGradeName("");
@@ -1206,7 +1221,7 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
   return (
     <div className="slide-screen" data-testid="community-drill-screen">
       <header className="top-header">
-        <button className="icon-button" onClick={onClose} data-testid="drill-back-button"><ChevronLeft size={20} /></button>
+        <button className="icon-button" onClick={goBack} data-testid="drill-back-button"><ChevronLeft size={20} /></button>
         <div className="screen-title">{loading ? "Loading…" : community.name || "Community"}</div>
         <div />
       </header>
@@ -1216,7 +1231,7 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
             <div className="community-icon big"><MapPin size={20} /></div>
             <div><h1 className="section-title">{loading ? "Loading…" : community.name}</h1><p className="muted">{loading ? "" : `${community.city || ""} · ${community.member_count || 0} members`}</p></div>
           </div>
-          {detail?.membership ? <span className="badge sage">Active</span> : communityId && <button className="button primary" onClick={() => join(communityId)} data-testid="request-to-join-button">Join</button>}
+          {detail?.membership ? <span className="badge sage">Active</span> : activeId && <button className="button primary" onClick={() => join(activeId)} data-testid="request-to-join-button">Join</button>}
           {user?.is_admin && community.join_slug && (
             <button className="button small secondary" onClick={() => copyLink(community.community_id, community.join_slug)} data-testid="copy-community-link-button">
               {copiedId === community.community_id ? <><Check size={15} /> Copied</> : "Copy join link"}
@@ -1226,7 +1241,21 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
         {detail?.grades && (
           <section className="stack">
             <h2 className="section-label">GRADE COMMUNITIES</h2>
-            {detail.grades.map((grade) => <div className="mini-card family-head" key={grade.community_id}><div><strong>{grade.name}</strong><p className="muted">{grade.member_count} members</p></div><div className="row" style={{ gap: 8 }}>{grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={() => join(grade.community_id)}>Join</button>}{user?.is_admin && grade.join_slug && <button className="button small secondary" onClick={() => copyLink(grade.community_id, grade.join_slug)}>{copiedId === grade.community_id ? <><Check size={15} /> Copied</> : "Copy link"}</button>}</div></div>)}
+            {detail.grades.map((grade) => (
+              <button
+                className="mini-card family-head"
+                key={grade.community_id}
+                onClick={() => viewGrade(grade.community_id)}
+                data-testid={`grade-row-${grade.community_id}`}
+                style={{ width: "100%", textAlign: "left", cursor: "pointer" }}
+              >
+                <div><strong>{grade.name}</strong><p className="muted">{grade.member_count} members</p></div>
+                <div className="row" style={{ gap: 8 }}>
+                  {grade.membership ? <span className="badge sage">Active</span> : <button className="button small secondary" onClick={(e) => { e.stopPropagation(); join(grade.community_id); }}>Join</button>}
+                  {user?.is_admin && grade.join_slug && <button className="button small secondary" onClick={(e) => { e.stopPropagation(); copyLink(grade.community_id, grade.join_slug); }}>{copiedId === grade.community_id ? <><Check size={15} /> Copied</> : "Copy link"}</button>}
+                </div>
+              </button>
+            ))}
             {(user?.is_admin || detail?.membership?.status === "active") && (
               addingGrade ? (
                 <div className="mini-card family-head" data-testid="add-grade-form">
@@ -1257,10 +1286,15 @@ function ParentRow({ parent }) {
 }
 
 function ParentProfileSheet({ parent, onClose }) {
-  const [status, setStatus] = useState(parent.sharing ? "sharing" : "idle");
+  const [status, setStatus] = useState(parent.share_status || "none");
   const child = firstChild(parent.children);
-  const request = async () => { try { const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parent.user_id }) }); setStatus(result.status === "approved" ? "sharing" : "pending"); toast.success(result.status === "approved" ? `✓ You're now sharing availability with ${parent.name} 🎉` : "Request sent"); } catch (error) { toast.error(error.message); } };
-  return <div className="sheet-overlay" data-testid="parent-profile-sheet"><section className="bottom-sheet centered-sheet"><div className="drag-handle" /><button className="icon-button sheet-close" onClick={onClose}><X size={18} /></button><div className="avatar-circle" style={{ width: 56, height: 56, margin: "0 auto" }}>{parent.name?.[0]}</div><h2>{parent.name}</h2><p className="muted">{child.first_name} · age {child.age}</p><span className="badge sage">{tierText(parent)}</span><div className="chip-row centered">{(child.interests || []).map((interest) => <span className="interest-pill" key={interest}>{interest}</span>)}</div><hr />{status === "sharing" ? <span className="badge sage">✓ Sharing availability</span> : <button className="button secondary" disabled={status === "pending"} onClick={request}>{status === "pending" ? "Request sent — waiting for response" : "Request to share availability"}</button>}</section></div>;
+  const request = async () => { try { const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parent.user_id }) }); setStatus(result.status === "approved" ? "approved" : "pending_sent"); toast.success(result.status === "approved" ? `✓ You're now sharing availability with ${parent.name} 🎉` : "Request sent"); } catch (error) { toast.error(error.message); } };
+  return <div className="sheet-overlay" data-testid="parent-profile-sheet"><section className="bottom-sheet centered-sheet"><div className="drag-handle" /><button className="icon-button sheet-close" onClick={onClose}><X size={18} /></button><div className="avatar-circle" style={{ width: 56, height: 56, margin: "0 auto" }}>{parent.name?.[0]}</div><h2>{parent.name}</h2><p className="muted">{child.first_name} · age {child.age}</p><span className="badge sage">{tierText(parent)}</span><div className="chip-row centered">{(child.interests || []).map((interest) => <span className="interest-pill" key={interest}>{interest}</span>)}</div><hr />{
+    status === "approved" ? <span className="badge sage">✓ Sharing availability</span>
+    : status === "pending_sent" ? <span className="badge amber">Request sent — waiting for response</span>
+    : status === "pending_received" ? <span className="badge blue">They asked to share with you — respond from Home</span>
+    : <button className="button secondary" onClick={request}>Request to share availability</button>
+  }</section></div>;
 }
 
 function CreateCommunityModal({ onClose, refreshAll }) {
