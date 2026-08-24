@@ -815,6 +815,8 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
     blocks = validate_blocks(payload.blocks)
     if payload.visibility_mode not in ["everyone", "manual", "request_only"]:
         raise HTTPException(status_code=400, detail="Invalid visibility mode")
+    if len(payload.child_ids) > 1:
+        raise HTTPException(status_code=400, detail="Availability can only be scoped to a single child")
     dates = [selected_date]
     if payload.recurrence == "weekly":
         dates = [selected_date + timedelta(days=7 * i) for i in range(53)]
@@ -834,7 +836,7 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
             "child_ids": payload.child_ids,
             "created_at": now_iso(),
         }
-        await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat()})
+        await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat(), "child_ids": payload.child_ids})
         await db.availability_slots.insert_one(doc.copy())
         saved.append(doc)
     return {"saved": saved[:60], "count": len(saved)}
@@ -846,8 +848,8 @@ async def list_availability(user: Dict[str, Any] = Depends(current_user)):
 
 
 @api_router.delete("/availability/{date_value}")
-async def remove_availability(date_value: str, user: Dict[str, Any] = Depends(current_user)):
-    await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value})
+async def remove_availability(date_value: str, child_id: Optional[str] = None, user: Dict[str, Any] = Depends(current_user)):
+    await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value, "child_ids": [child_id] if child_id else []})
     return {"ok": True}
 
 
