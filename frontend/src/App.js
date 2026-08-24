@@ -26,7 +26,6 @@ import {
   Plus,
   Search,
   Send,
-  Trash2,
   Users,
   UserRound,
   X,
@@ -63,8 +62,35 @@ const minutes = (value) => {
   return h * 60 + m;
 };
 
+const minutesToTime = (total) => `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+
+const DAY_CHIP_TIMES = Array.from({ length: 21 }, (_, i) => minutesToTime(9 * 60 + i * 30));
+
+const chipsToBlocks = (chips) => {
+  const sorted = [...chips].sort((a, b) => minutes(a) - minutes(b));
+  const blocks = [];
+  for (const t of sorted) {
+    const last = blocks[blocks.length - 1];
+    if (last && minutes(last.end) === minutes(t)) {
+      last.end = minutesToTime(minutes(t) + 30);
+    } else {
+      blocks.push({ start: t, end: minutesToTime(minutes(t) + 30) });
+    }
+  }
+  return blocks;
+};
+
+const blocksToChips = (blocks) => {
+  const chips = new Set();
+  for (const block of blocks || []) {
+    for (let m = minutes(block.start); m < minutes(block.end); m += 30) chips.add(minutesToTime(m));
+  }
+  return chips;
+};
+
 const GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"];
 const INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"];
+const ACTIVITIES = ["Park", "Our place", "Their place", "Swimming", "Soft play", "Free play"];
 
 const api = async (path, options = {}) => {
   const res = await fetch(`${API}${path}`, {
@@ -421,59 +447,91 @@ function SponsorRequestCard({ request, onResponded }) {
   );
 }
 
-const sameChildScope = (a, b) => {
-  const scopeA = a || [];
-  const scopeB = b || [];
-  return scopeA.length === scopeB.length && scopeA.every((id) => scopeB.includes(id));
+const defaultRecurringEndDate = (fromDate) => {
+  const year = fromDate.getFullYear();
+  const june30 = new Date(year, 5, 30);
+  return june30 >= fromDate ? june30 : new Date(year + 1, 5, 30);
 };
 
-function AvailabilitySheet({ selectedDate, availability, onClose, onSaved, children }) {
-  const [selectedChildIds, setSelectedChildIds] = useState([]);
-  const existing = availability.find((slot) => slot.date === isoDate(selectedDate) && sameChildScope(slot.child_ids, selectedChildIds));
-  const [blocks, setBlocks] = useState(existing?.blocks?.length ? existing.blocks : [{ start: "15:00", end: "17:00" }]);
-  const [recurrence, setRecurrence] = useState("weekly");
-  const [visibilityMode, setVisibilityMode] = useState(existing?.visibility_mode || "everyone");
-  const [manualIds, setManualIds] = useState(existing?.visible_to_parent_ids || []);
+const mostRecentSlot = (availability) => {
+  const sorted = [...availability].filter((s) => s.created_at).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return sorted[0] || null;
+};
+
+function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
+  const dateSlots = availability.filter((slot) => slot.date === isoDate(selectedDate));
+  const existing = dateSlots[0] || null;
+  const lastUsed = existing || mostRecentSlot(availability);
+  const [checkedIds, setCheckedIds] = useState(() => new Set(
+    children.length
+      ? (dateSlots.length
+          ? children.filter((c) => dateSlots.some((s) => !s.child_ids?.length || s.child_ids.includes(c.child_id))).map((c) => c.child_id)
+          : children.map((c) => c.child_id))
+      : []
+  ));
+  const [chips, setChips] = useState(() => (existing?.blocks?.length ? blocksToChips(existing.blocks) : new Set(["15:00", "15:30", "16:00", "16:30"])));
+  const [recurrence, setRecurrence] = useState(existing?.is_recurring ? "weekly" : "once");
+  const [endDate, setEndDate] = useState(existing?.recurring_end_date || isoDate(defaultRecurringEndDate(selectedDate)));
+  const [editingEndDate, setEditingEndDate] = useState(false);
+  const [visibilityMode, setVisibilityMode] = useState(lastUsed?.visibility_mode || "everyone");
+  const [manualIds, setManualIds] = useState(lastUsed?.visible_to_parent_ids || []);
   const [members, setMembers] = useState([]);
   const [membersLoading, setMembersLoading] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
+  const isPast = isoDate(selectedDate) < isoDate(new Date());
+
   useEffect(() => {
     api("/community-members")
       .then(setMembers)
       .catch(() => setMembers([]))
       .finally(() => setMembersLoading(false));
   }, []);
-  useEffect(() => {
-    setBlocks(existing?.blocks?.length ? existing.blocks : [{ start: "15:00", end: "17:00" }]);
-    setVisibilityMode(existing?.visibility_mode || "everyone");
-    setManualIds(existing?.visible_to_parent_ids || []);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedChildIds.join(","), existing?.slot_id]);
+
+  const toggleChip = (t) => {
+    setChips((prev) => {
+      const next = new Set(prev);
+      next.has(t) ? next.delete(t) : next.add(t);
+      return next;
+    });
+  };
+
+  const toggleChild = (childId) => {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      next.has(childId) ? next.delete(childId) : next.add(childId);
+      return next;
+    });
+  };
+
   const toggleManual = (parentId) => {
     setManualIds((prev) => prev.includes(parentId) ? prev.filter((id) => id !== parentId) : [...prev, parentId]);
   };
-  const selectChild = (childId) => {
-    setSelectedChildIds((prev) => (prev[0] === childId ? [] : [childId]));
-  };
-  const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
-  const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
-  const isPast = isoDate(selectedDate) < isoDate(new Date());
-
-  const updateBlock = (index, field, value) => {
-    setBlocks((prev) => prev.map((block, i) => {
-      if (i !== index) return block;
-      const next = { ...block, [field]: value };
-      if (field === "start" && minutes(next.end) <= minutes(value)) {
-        const nextEnd = timeOptions.find((t) => minutes(t) >= minutes(value) + 15) || "21:00";
-        next.end = nextEnd;
-      }
-      return next;
-    }));
-  };
 
   const save = async () => {
+    const blocks = chipsToBlocks(chips);
+    if (!blocks.length) {
+      toast.error("Tap at least one time you're open");
+      return;
+    }
+    const childIds = children.length <= 1
+      ? (children[0] ? [children[0].child_id] : [])
+      : (checkedIds.size === children.length ? [] : [...checkedIds]);
     try {
-      await api("/availability", { method: "POST", body: JSON.stringify({ date: isoDate(selectedDate), blocks, recurrence, visibility_mode: visibilityMode, visible_to_parent_ids: manualIds, child_ids: selectedChildIds }) });
-      toast.success("Availability saved");
+      await api("/availability", {
+        method: "POST",
+        body: JSON.stringify({
+          date: isoDate(selectedDate),
+          blocks,
+          recurrence,
+          visibility_mode: visibilityMode,
+          visible_to_parent_ids: manualIds,
+          child_ids: childIds,
+          recurring_end_date: recurrence === "weekly" ? endDate : null,
+        }),
+      });
+      toast.success("Saved");
       await onSaved();
       onClose();
     } catch (error) {
@@ -481,15 +539,24 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved, child
     }
   };
 
-  const remove = async () => {
+  const doRemove = async () => {
     try {
-      const query = selectedChildIds[0] ? `?child_id=${selectedChildIds[0]}` : "";
+      const childId = existing?.child_ids?.[0];
+      const query = childId ? `?child_id=${childId}` : "";
       await api(`/availability/${isoDate(selectedDate)}${query}`, { method: "DELETE" });
-      toast.success("Availability removed");
+      toast.success("Removed");
       await onSaved();
       onClose();
     } catch (error) {
       toast.error(error.message);
+    }
+  };
+
+  const remove = () => {
+    if (existing?.ever_held) {
+      setConfirmDelete(true);
+    } else {
+      doRemove();
     }
   };
 
@@ -505,51 +572,44 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved, child
           <div className="empty-state" data-testid="past-date-message">Past dates are view only.</div>
         ) : (
           <div className="stack">
-            <div className="time-bar" data-testid="availability-time-bar">
-              {blocks.map((block, index) => {
-                const left = ((minutes(block.start) - 360) / 900) * 100;
-                const width = ((minutes(block.end) - minutes(block.start)) / 900) * 100;
-                return <span key={`${block.start}-${block.end}-${index}`} className="time-segment" style={{ left: `${left}%`, width: `${width}%` }} data-testid={`availability-time-segment-${index}`} />;
-              })}
-            </div>
-            {blocks.map((block, index) => (
-              <div className="time-block" key={index} data-testid={`availability-block-${index}`}>
-                <select className="select" value={block.start} onChange={(e) => updateBlock(index, "start", e.target.value)} data-testid={`availability-from-select-${index}`}>
-                  {timeOptions.slice(0, -1).map((time) => <option key={time} value={time}>{timeLabel(time)}</option>)}
-                </select>
-                <select className="select" value={block.end} onChange={(e) => updateBlock(index, "end", e.target.value)} data-testid={`availability-until-select-${index}`}>
-                  {timeOptions.filter((time) => minutes(time) > minutes(block.start)).map((time) => <option key={time} value={time}>{timeLabel(time)}</option>)}
-                </select>
-                <button className="icon-button" onClick={() => setBlocks((prev) => prev.filter((_, i) => i !== index))} disabled={blocks.length === 1} data-testid={`availability-remove-block-button-${index}`}><Trash2 size={18} /></button>
-              </div>
-            ))}
-            {blocks.length < 4 && <button className="button ghost" onClick={() => setBlocks((prev) => [...prev, { start: "10:00", end: "12:00" }])} data-testid="availability-add-block-button">+ Add another time block</button>}
-            <div className="radio-pills" data-testid="availability-recurring-options">
-              <button className={`radio-pill ${recurrence === "once" ? "active" : ""}`} onClick={() => setRecurrence("once")} data-testid="availability-once-button">Just this once</button>
-              <button className={`radio-pill ${recurrence === "weekly" ? "active" : ""}`} onClick={() => setRecurrence("weekly")} data-testid="availability-weekly-button">Every {dayName}</button>
+            <p className="muted">Tap the times you're open</p>
+            <div className="time-grid" data-testid="availability-time-grid">
+              {DAY_CHIP_TIMES.map((t) => (
+                <button key={t} className={`time-chip ${chips.has(t) ? "active" : ""}`} onClick={() => toggleChip(t)} data-testid={`availability-time-chip-${t}`}>
+                  {timeLabel(t)}
+                </button>
+              ))}
             </div>
             {children.length > 1 && (
               <section className="stack" data-testid="availability-child-section">
-                <h4 className="section-label">WHOSE AVAILABILITY?</h4>
-                <div className="radio-pills">
-                  <button className={`radio-pill ${selectedChildIds.length === 0 ? "active" : ""}`} onClick={() => setSelectedChildIds([])} data-testid="availability-child-all-button">All kids</button>
-                  {children.map((child) => (
-                    <button
-                      key={child.child_id}
-                      className={`radio-pill ${selectedChildIds.includes(child.child_id) ? "active" : ""}`}
-                      onClick={() => selectChild(child.child_id)}
-                      data-testid={`availability-child-${child.child_id}-button`}
-                    >
-                      {child.first_name}
-                    </button>
-                  ))}
+                <h4 className="section-label">WHO'S FREE</h4>
+                <div className="stack" style={{ gap: 8 }}>
+                  {children.map((child) => {
+                    const checked = checkedIds.has(child.child_id);
+                    return (
+                      <button
+                        type="button"
+                        key={child.child_id}
+                        className={`parent-row ${checked ? "active" : ""}`}
+                        onClick={() => toggleChild(child.child_id)}
+                        data-testid={`availability-child-${child.child_id}-button`}
+                      >
+                        <div className="avatar-circle" style={{ width: 36, height: 36 }}>{child.first_name?.[0]?.toUpperCase()}</div>
+                        <strong>{child.first_name}</strong>
+                        {checked && <Check size={18} data-testid={`availability-child-checked-${child.child_id}`} />}
+                      </button>
+                    );
+                  })}
                 </div>
+                <p className="muted" style={{ fontSize: 12 }}>Both children start checked — most open windows are the whole household. Uncheck anyone with a conflict.</p>
               </section>
             )}
             <section className="stack" data-testid="availability-visibility-section">
               <h4 className="section-label">WHO CAN SEE THIS?</h4>
               <div className="visibility-options">
-                {[["everyone", "Everyone in my communities"], ["manual", "Only people I select"], ["request_only", "Only people who request"]].map(([value, label]) => <button key={value} className={`radio-pill ${visibilityMode === value ? "active" : ""}`} onClick={() => setVisibilityMode(value)} data-testid={`visibility-${value}-button`}>{label}</button>)}
+                {[["everyone", "Everyone in my communities"], ["manual", "Only people I select"], ["request_only", "Only people who request"]].map(([value, label]) => (
+                  <button key={value} className={`radio-pill ${visibilityMode === value ? "active" : ""}`} onClick={() => setVisibilityMode(value)} data-testid={`visibility-${value}-button`}>{label}</button>
+                ))}
               </div>
               {visibilityMode === "manual" && (
                 <div className="manual-list stack" data-testid="manual-visibility-list">
@@ -580,21 +640,51 @@ function AvailabilitySheet({ selectedDate, availability, onClose, onSaved, child
                 </div>
               )}
             </section>
-            <button className="button primary" onClick={save} data-testid="availability-save-button">Save availability →</button>
-            {existing && <button className="button secondary" onClick={remove} data-testid="availability-remove-date-button">Remove this date</button>}
+            <div className="radio-pills" data-testid="availability-recurring-options">
+              <button className={`radio-pill ${recurrence === "once" ? "active" : ""}`} onClick={() => setRecurrence("once")} data-testid="availability-once-button">Just this once</button>
+              <button className={`radio-pill ${recurrence === "weekly" ? "active" : ""}`} onClick={() => setRecurrence("weekly")} data-testid="availability-weekly-button">Every {dayName}</button>
+            </div>
+            {recurrence === "weekly" && (
+              <div className="mini-card row" style={{ justifyContent: "space-between" }} data-testid="availability-end-date-row">
+                {editingEndDate ? (
+                  <input className="input" type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} onBlur={() => setEditingEndDate(false)} autoFocus data-testid="availability-end-date-input" />
+                ) : (
+                  <>
+                    <span>Ends <strong>{fmtDate(endDate, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</strong></span>
+                    <button className="text-link" onClick={() => setEditingEndDate(true)} data-testid="availability-end-date-change-button">Change</button>
+                  </>
+                )}
+              </div>
+            )}
+            <button className="button primary" onClick={save} data-testid="availability-save-button">Save</button>
+            {existing && <button className="button secondary" onClick={remove} data-testid="availability-remove-button">Remove this time</button>}
           </div>
         )}
       </section>
+      {confirmDelete && (
+        <div className="center-overlay" data-testid="availability-remove-confirm-overlay">
+          <section className="modal-panel stack" data-testid="availability-remove-confirm-modal">
+            <div className="sheet-title-row">
+              <h3>Remove this time?</h3>
+              <button className="icon-button" onClick={() => setConfirmDelete(false)} data-testid="availability-remove-confirm-close"><X size={20} /></button>
+            </div>
+            <p className="muted">A family has proposed against this slot before. Removing it won't cancel any playdate already confirmed, but it will take back this open time.</p>
+            <button className="button primary" onClick={doRemove} data-testid="availability-remove-confirm-button">Remove anyway</button>
+            <button className="button secondary" onClick={() => setConfirmDelete(false)} data-testid="availability-remove-cancel-button">Keep it</button>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
 
-function CalendarView({ dashboard, refresh, selectedDate, onSelectDate }) {
+function CalendarView({ dashboard, refresh, selectedDate, onSelectDate, activeChildId, activeChildName, onPastPlaydates }) {
   const [cursor, setCursor] = useState(new Date());
   const [view, setView] = useState("month");
   const availability = dashboard?.availability || [];
   const playdates = dashboard?.playdates || [];
-  const availabilityDates = new Set(availability.map((slot) => slot.date));
+  const childSlots = activeChildId ? availability.filter((slot) => !slot.child_ids?.length || slot.child_ids.includes(activeChildId)) : availability;
+  const availabilityDates = new Set(childSlots.map((slot) => slot.date));
   const pendingDates = new Set(playdates.filter((p) => ["proposed", "countered"].includes(p.status)).map((p) => p.date));
   const confirmedDates = new Set(playdates.filter((p) => ["confirmed", "rescheduled", "completed"].includes(p.status)).map((p) => p.date));
 
@@ -649,95 +739,200 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate }) {
         })}
       </div>
       <div className="chip-row" data-testid="calendar-legend">
-        <span className="row" style={{ gap: 6 }} data-testid="legend-available"><span className="dot sage" style={{ width: 10, height: 10 }} />Your availability</span>
+        <span className="row" style={{ gap: 6 }} data-testid="legend-available"><span className="dot sage" style={{ width: 10, height: 10 }} />{activeChildName ? `${activeChildName} is free` : "Your availability"}</span>
         <span className="row" style={{ gap: 6 }} data-testid="legend-pending"><span className="dot amber" style={{ width: 10, height: 10 }} />Pending proposal</span>
         <span className="row" style={{ gap: 6 }} data-testid="legend-confirmed"><span className="dot terra" style={{ width: 10, height: 10 }} />Confirmed playdate</span>
       </div>
-      {selectedDate && <AvailabilitySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} />}
+      <p className="muted" style={{ fontSize: 12 }}>Tap any date to set open time. Recurring slots pause on their own after four quiet weeks.</p>
+      {onPastPlaydates && <button className="text-link" onClick={onPastPlaydates} data-testid="past-playdates-link">Past playdates ›</button>}
+      {selectedDate && <DaySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} />}
     </section>
   );
 }
 
-function availabilityVisibilityText(slot) {
-  if (slot.visibility_mode === "manual") {
-    const count = slot.visible_to_parent_ids?.length || 0;
-    return `Only ${count} selected ${count === 1 ? "person" : "people"}`;
+function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
+  const navigate = useNavigate();
+  const [feedData, setFeedData] = useState(null);
+  const [filter, setFilter] = useState("When we're both free");
+  const [expanded, setExpanded] = useState(() => new Set());
+
+  useEffect(() => {
+    setFeedData(null);
+    api("/community-feed").then(setFeedData).catch(() => setFeedData({ rows: [], matches: [] }));
+  }, [dashboard]);
+
+  if (feedData === null) {
+    return (
+      <div className="stack" data-testid="who-free-loading">
+        {[0, 1, 2].map((i) => <div key={i} className="card" style={{ minHeight: 130, opacity: 0.5 }} data-testid={`who-free-skeleton-${i}`} />)}
+      </div>
+    );
   }
-  if (slot.visibility_mode === "request_only") return "Only people who request";
-  return "Everyone in your communities";
-}
 
-function AvailabilitySummary({ dashboard }) {
-  const availability = dashboard?.availability || [];
-  const children = dashboard?.children || [];
-  const today = isoDate(new Date());
-  const upcoming = availability.filter((slot) => slot.date >= today).sort((a, b) => a.date.localeCompare(b.date));
-  const groups = [
-    { key: "all", label: "All kids", slots: upcoming.filter((slot) => !slot.child_ids?.length) },
-    ...children.map((child) => ({
-      key: child.child_id,
-      label: child.first_name,
-      slots: upcoming.filter((slot) => slot.child_ids?.length === 1 && slot.child_ids[0] === child.child_id),
-    })),
-  ].filter((group) => group.slots.length);
+  const childRows = activeChild ? feedData.rows.filter((r) => r.child_id === activeChild.child_id) : feedData.rows;
 
-  if (!groups.length) return null;
+  if (!childRows.length) {
+    const gradeCommunity = activeChild && dashboard?.communities?.find((c) => c.master_community_id && c.name === activeChild.grade);
+    return (
+      <div className="card empty-state stack" data-testid="who-free-empty-state">
+        <h3 className="card-title">No one's sharing with {activeChild?.first_name || "your child"} yet</h3>
+        <p className="muted">Families in {activeChild?.grade || "your child's grade"} choose who sees their open time. Ask a family to share, and their calendar shows up here.</p>
+        <button
+          className="button primary"
+          onClick={() => navigate("/community", gradeCommunity ? { state: { communityId: gradeCommunity.community_id } } : undefined)}
+          data-testid="who-free-empty-find-button"
+        >
+          Find families in {activeChild?.grade || "your grade"}
+        </button>
+        {gradeCommunity?.join_slug && (
+          <button
+            className="text-link"
+            onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/join/${gradeCommunity.join_slug}`); toast.success("Link copied"); }}
+            data-testid="who-free-empty-invite-link"
+          >
+            Invite a family by link
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const overlapIds = new Set((feedData.matches || []).map((m) => m.parent.user_id));
+  const weekEnd = isoDate(new Date(Date.now() + 7 * 86400000));
+  let filtered = childRows;
+  if (filter === "When we're both free") filtered = childRows.filter((r) => overlapIds.has(r.family_id));
+  else if (filter === "Free this week") filtered = childRows.filter((r) => r.date <= weekEnd);
+
+  const families = [];
+  const byFamilyId = new Map();
+  for (const row of filtered) {
+    if (!byFamilyId.has(row.family_id)) {
+      const entry = { family_id: row.family_id, parent_name: row.parent_name, parent_picture: row.parent_picture, child_name: row.child_name, grade: row.grade, rows: [] };
+      byFamilyId.set(row.family_id, entry);
+      families.push(entry);
+    }
+    byFamilyId.get(row.family_id).rows.push(row);
+  }
 
   return (
-    <section className="stack" data-testid="availability-summary-section">
-      <h2 className="section-label" data-testid="availability-summary-title">MY AVAILABILITY</h2>
-      {groups.map((group) => (
-        <div className="card stack" key={group.key} data-testid={`availability-summary-${group.key}`}>
-          <strong>{group.label}</strong>
-          {group.slots.slice(0, 8).map((slot) => (
-            <div className="row" style={{ justifyContent: "space-between" }} key={slot.slot_id} data-testid={`availability-summary-slot-${slot.slot_id}`}>
-              <span>{fmtDate(slot.date, { weekday: "short", month: "short", day: "numeric" })} · {slot.blocks?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</span>
-              <span className="muted">{availabilityVisibilityText(slot)}</span>
-            </div>
-          ))}
-          {group.slots.length > 8 && <p className="muted" data-testid={`availability-summary-more-${group.key}`}>+{group.slots.length - 8} more dates</p>}
+    <div className="stack" data-testid="who-free-feed">
+      <div className="chip-row" data-testid="who-free-filters">
+        {["When we're both free", "Free this week", "All families"].map((item) => (
+          <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`who-free-filter-${item.toLowerCase().replace(/[^a-z]+/g, "-")}`}>{item}</button>
+        ))}
+      </div>
+      {families.length ? (
+        <>
+          <p className="section-label" data-testid="who-free-count">{families.length} {families.length === 1 ? "family" : "families"} open to {activeChild?.first_name || "you"}</p>
+          {families.map((family) => {
+            const isExpanded = expanded.has(family.family_id);
+            const visibleRows = isExpanded ? family.rows : family.rows.slice(0, 3);
+            return (
+              <div className="card" key={family.family_id} data-testid={`who-free-card-${family.family_id}`}>
+                <div className="family-head">
+                  <div className="row" style={{ gap: 10 }}>
+                    <div className="avatar-circle" style={{ width: 46, height: 46 }}>
+                      {family.parent_picture ? <img src={family.parent_picture} alt="" /> : family.child_name?.[0]?.toUpperCase()}
+                    </div>
+                    <div>
+                      <strong>{family.child_name} · {family.grade}</strong>
+                      <p className="muted">{family.parent_name}</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="stack" style={{ gap: 8 }}>
+                  {visibleRows.map((row) => row.status === "held" ? (
+                    <div className="slot-button held" key={row.slot_id} data-testid={`who-free-slot-held-${row.slot_id}`}>
+                      <span>{fmtDate(row.date, { weekday: "short", month: "short", day: "numeric" })} · {row.slot_time?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</span>
+                      <span className="heldtag">Waiting on another family</span>
+                    </div>
+                  ) : (
+                    <button className="slot-button" key={row.slot_id} onClick={() => onPropose(row)} data-testid={`who-free-slot-open-${row.slot_id}`}>
+                      <span>{fmtDate(row.date, { weekday: "short", month: "short", day: "numeric" })} · {row.slot_time?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</span>
+                      <span className="arrow">Propose ›</span>
+                    </button>
+                  ))}
+                </div>
+                {family.rows.length > 3 && !isExpanded && (
+                  <button className="text-link" onClick={() => setExpanded((prev) => new Set(prev).add(family.family_id))} data-testid={`who-free-see-all-${family.family_id}`}>
+                    See all {family.rows.length} openings
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          <p className="muted" style={{ fontSize: 12 }} data-testid="who-free-held-hint">Slots marked <strong>waiting</strong> already have a proposal pending. They free up again if that family declines.</p>
+        </>
+      ) : (
+        <div className="empty-state card" data-testid="who-free-filter-empty">No families match this filter yet.</div>
+      )}
+    </div>
+  );
+}
+
+function PastPlaydatesSheet({ dashboard, user, refresh, onClose }) {
+  const past = (dashboard?.playdates || []).filter((p) => p.status === "completed");
+  return (
+    <div className="sheet-overlay" data-testid="past-playdates-overlay">
+      <section className="bottom-sheet stack" data-testid="past-playdates-sheet">
+        <div className="drag-handle" />
+        <div className="sheet-title-row">
+          <h3>Past playdates</h3>
+          <button className="icon-button" onClick={onClose} data-testid="past-playdates-close-button"><X size={20} /></button>
         </div>
-      ))}
-    </section>
+        {past.length ? past.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />) : <div className="empty-state" data-testid="past-playdates-empty">No completed playdates yet.</div>}
+      </section>
+    </div>
   );
 }
 
 function PlaydatesPage({ user, dashboard, refresh }) {
-  const [showGroup, setShowGroup] = useState(false);
-  const [feed, setFeed] = useState({ families: [], matches: [] });
+  const children = dashboard?.children || [];
+  const [activeChildId, setActiveChildId] = useState(children[0]?.child_id || null);
+  const [mode, setMode] = useState("free");
   const [proposal, setProposal] = useState(null);
-  const [filter, setFilter] = useState("Upcoming");
-  const [feedFilter, setFeedFilter] = useState("Overlapping with me");
   const [selectedDate, setSelectedDate] = useState(null);
-  useEffect(() => { api("/community-feed").then(setFeed).catch(() => {}); }, [dashboard]);
-  const visiblePlaydates = (dashboard?.playdates || []).filter((p) => filter === "All" || (filter === "Completed" ? p.status === "completed" : p.status !== "completed"));
-  const overlapIds = new Set((feed.matches || []).map((m) => m.parent.user_id));
-  const families = (feed.families || []).filter((family) => feedFilter === "All families" || (feedFilter === "Overlapping with me" ? overlapIds.has(family.parent.user_id) : true));
+  const [showPast, setShowPast] = useState(false);
+
+  useEffect(() => {
+    if (children.length && !children.some((c) => c.child_id === activeChildId)) setActiveChildId(children[0].child_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [children.map((c) => c.child_id).join(",")]);
+
+  const activeChild = children.find((c) => c.child_id === activeChildId) || null;
+
   return (
     <AppLayout title="Playdates" user={user}>
       <div className="stack stagger">
-        <div className="chip-row" data-testid="playdates-action-row">
-          <button className="button sage-outline" onClick={() => setSelectedDate(new Date())} data-testid="set-availability-button"><Plus size={18} /> Set Availability</button>
-          {/* Hidden: feature not ready, deferred to P2.3 per Enhancement Priorities doc. Modal/state/route left intact. */}
-          {false && <button className="button primary" onClick={() => setShowGroup(true)} data-testid="new-group-playdate-button"><Users size={18} /> Group Playdate</button>}
+        {children.length > 1 && (
+          <div className="chip-row" data-testid="playdates-child-chip-row">
+            {children.map((child) => (
+              <button key={child.child_id} className={`filter-pill ${activeChildId === child.child_id ? "active" : ""}`} onClick={() => setActiveChildId(child.child_id)} data-testid={`playdates-child-chip-${child.child_id}`}>
+                {child.first_name}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="view-toggle" style={{ gridTemplateColumns: "1fr 1fr" }} data-testid="playdates-mode-toggle">
+          <button className={mode === "free" ? "active" : ""} onClick={() => setMode("free")} data-testid="playdates-mode-free-button">Who's free</button>
+          <button className={mode === "mine" ? "active" : ""} onClick={() => setMode("mine")} data-testid="playdates-mode-mine-button">My time</button>
         </div>
-        <CalendarView dashboard={dashboard} refresh={refresh} selectedDate={selectedDate} onSelectDate={setSelectedDate} />
-        <AvailabilitySummary dashboard={dashboard} />
-        <section className="stack" data-testid="playdates-availability-feed">
-          <h2 className="section-label" data-testid="who-free-title">WHO'S FREE THIS WEEK</h2>
-          <div className="chip-row">{["Overlapping with me", "Free this week", "All families"].map((item) => <button key={item} className={`filter-pill ${feedFilter === item ? "active" : ""}`} onClick={() => setFeedFilter(item)} data-testid={`feed-filter-${item.toLowerCase().replaceAll(" ", "-")}`}>{item}</button>)}</div>
-          {feedFilter === "Overlapping with me" && <p className="hint-line" data-testid="overlap-hint">⚡ Families with an amber border overlap with your availability this week.</p>}
-          {families.map((family) => <FamilyAvailabilityCard key={family.parent.user_id} family={family} overlapping={overlapIds.has(family.parent.user_id)} dashboard={dashboard} onPropose={(slot) => setProposal({ family, slot })} />)}
-          {!families.length && <div className="empty-state card" data-testid="family-feed-empty">No families match this filter yet.</div>}
-        </section>
-        <section className="stack" data-testid="playdate-list-section">
-          <h2 className="section-title" data-testid="playdate-list-title">{filter}</h2>
-          <div className="chip-row" data-testid="playdate-filter-pills">{["Upcoming", "Completed", "All"].map((item) => <button key={item} className={`filter-pill ${filter === item ? "active" : ""}`} onClick={() => setFilter(item)} data-testid={`filter-${item.toLowerCase()}-button`}>{item}</button>)}</div>
-          {visiblePlaydates.length ? visiblePlaydates.map((playdate) => <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />) : <div className="empty-state card" data-testid="playdates-empty-state">No playdates yet.</div>}
-        </section>
+        {mode === "free" ? (
+          <WhoFreeFeed activeChild={activeChild} dashboard={dashboard} onPropose={setProposal} />
+        ) : (
+          <CalendarView
+            dashboard={dashboard}
+            refresh={refresh}
+            selectedDate={selectedDate}
+            onSelectDate={setSelectedDate}
+            activeChildId={activeChild?.child_id}
+            activeChildName={activeChild?.first_name}
+            onPastPlaydates={() => setShowPast(true)}
+          />
+        )}
       </div>
-      {proposal && <ProposalModal {...proposal} dashboard={dashboard} refresh={refresh} onClose={() => setProposal(null)} />}
-      {showGroup && <GroupPlaydateModal dashboard={dashboard} refresh={refresh} onClose={() => setShowGroup(false)} />}
+      {proposal && <ProposalModal row={proposal} dashboard={dashboard} refresh={refresh} onClose={() => setProposal(null)} />}
+      {showPast && <PastPlaydatesSheet dashboard={dashboard} user={user} refresh={refresh} onClose={() => setShowPast(false)} />}
     </AppLayout>
   );
 }
@@ -747,24 +942,17 @@ function ActivityCard({ note }) {
   return <div className="activity-card" data-testid={`activity-card-${note.notification_id}`}><span className={`activity-icon ${note.kind || "default"}`}><Icon size={16} /></span><div><strong>{note.title}</strong><p>{note.body}</p><small>{fmtDate(note.created_at?.slice(0, 10) || isoDate(new Date()), { month: "short", day: "numeric" })}</small></div>{!note.read_at && <i />}</div>;
 }
 
-function FamilyAvailabilityCard({ family, overlapping, dashboard, onPropose }) {
-  const child = firstChild(family.children);
-  const ownChild = firstChild(dashboard?.children);
-  const slot = family.slots?.[0];
-  return <article className={`family-availability-card ${overlapping ? "overlapping" : ""}`} data-testid={`family-availability-${family.parent.user_id}`}><div className="family-head"><div className="row" style={{ gap: 10 }}><div className="avatar-circle" style={{ width: 40, height: 40 }}>{family.parent.name?.[0]}</div><div><strong>{family.parent.name}</strong><p className="muted">{child.first_name} · age {child.age}</p></div></div><span className="badge sage">{tierText(family.parent)}</span></div><div className="chip-row">{(child.interests || []).slice(0, 4).map((interest) => <span className="interest-pill small" key={interest}>{interest}</span>)}</div>{slot && <div className="family-head"><p><span className="green-dot">●</span> {fmtDate(slot.date, { weekday: "long" })} {slot.blocks?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</p>{overlapping && <span className="badge amber">⚡ Overlap</span>}</div>}<button className="button primary" onClick={() => onPropose(slot)} data-testid={`family-propose-${family.parent.user_id}`}>Propose — {ownChild.first_name || "Your child"} + {child.first_name || "Friend"}</button></article>;
-}
-
-function ProposalModal({ slot, family, match, dashboard, onClose, refresh }) {
+function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const [location, setLocation] = useState("Neighborhood park");
-  const [activity, setActivity] = useState("Free play");
-  const [notes, setNotes] = useState("");
-  const targetSlots = family?.slots || (match ? [{ date: match.date, blocks: [{ start: match.start_time, end: match.end_time }], overlapping: true }] : []);
-  const [manualDate, setManualDate] = useState(isoDate(new Date(Date.now() + 86400000)));
-  const [manualStart, setManualStart] = useState("15:00");
-  const [manualEnd, setManualEnd] = useState("17:00");
-  const [selectedSlot, setSelectedSlot] = useState(slot || targetSlots[0] || null);
-  const selected = match || { parent: family?.parent, children: family?.children, date: selectedSlot?.date || manualDate, start_time: selectedSlot?.blocks?.[0]?.start || manualStart, end_time: selectedSlot?.blocks?.[0]?.end || manualEnd };
-  const ownChild = dashboard?.children?.[0];
+  const [activity, setActivity] = useState(ACTIVITIES[0]);
+  const selected = match
+    ? { parentId: match.parent.user_id, parentName: match.parent.name, childName: match.children?.[0]?.first_name, childId: match.children?.[0]?.child_id, date: match.date, blocks: [{ start: match.start_time, end: match.end_time }] }
+    : row
+    ? { parentId: row.family_id, parentName: row.parent_name, childName: row.child_name, childId: row.child_id, date: row.date, blocks: row.slot_time, slotId: row.slot_id }
+    : null;
+  const ownChild = dashboard?.children?.find((c) => c.child_id === (row?.child_id)) || dashboard?.children?.[0];
+  const today = isoDate(new Date());
+  const hasOwnOpenSlot = (dashboard?.availability || []).some((s) => !s.is_paused && s.date >= today && (!s.child_ids?.length || s.child_ids.includes(ownChild?.child_id)));
 
   const submit = async () => {
     try {
@@ -772,16 +960,17 @@ function ProposalModal({ slot, family, match, dashboard, onClose, refresh }) {
         method: "POST",
         body: JSON.stringify({
           type: "1:1",
-          invitee_parent_ids: [selected.parent.user_id],
+          invitee_parent_ids: [selected.parentId],
           child_ids: ownChild ? [ownChild.child_id] : [],
           date: selected.date,
-          start_time: selected.start_time,
-          end_time: selected.end_time,
+          start_time: selected.blocks[0].start,
+          end_time: selected.blocks[selected.blocks.length - 1].end,
           location,
           activity,
-          notes,
+          notes: "",
           min_confirmations: 1,
-          title: `${ownChild?.first_name || "PlayPal"} + ${selected.children?.[0]?.first_name || "friend"}`,
+          title: `${ownChild?.first_name || "PlayPal"} + ${selected.childName || "friend"}`,
+          slot_id: selected.slotId || null,
         }),
       });
       toast.success("Proposal sent");
@@ -792,22 +981,32 @@ function ProposalModal({ slot, family, match, dashboard, onClose, refresh }) {
     }
   };
 
-  if (!selected?.parent) return null;
+  if (!selected) return null;
   return (
     <div className="center-overlay" data-testid="proposal-modal-overlay">
       <section className="modal-panel stack" data-testid="proposal-modal">
-        <div className="sheet-title-row"><h3 data-testid="proposal-title">Propose Playdate</h3><button className="icon-button" onClick={onClose} data-testid="proposal-close-button"><X size={20} /></button></div>
-        <div className="mini-card" data-testid="proposal-prefill-card">
-          <strong data-testid="proposal-children">{ownChild?.first_name || "Your child"} + {selected.children?.[0]?.first_name || selected.parent.name}</strong>
-          <p className="muted" data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}, {timeLabel(selected.start_time)}–{timeLabel(selected.end_time)}</p>
-        </div>
-        <div className="stack" data-testid="proposal-slot-list">
-          <h4 className="section-label">OPEN AVAILABILITY</h4>
-          {targetSlots.length ? targetSlots.map((slotItem, index) => <button key={`${slotItem.date}-${index}`} className={`slot-pill ${selectedSlot === slotItem ? "active" : ""} ${index === 0 ? "overlap" : ""}`} onClick={() => setSelectedSlot(slotItem)} data-testid={`proposal-slot-${index}`}>{index === 0 ? "⚡ " : ""}{fmtDate(slotItem.date, { weekday: "short", month: "short", day: "numeric" })} · {slotItem.blocks?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</button>) : <div className="mini-card stack" data-testid="proposal-no-availability"><p className="muted">This family hasn't set availability yet. You can still send a proposal.</p><input className="input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)} data-testid="proposal-manual-date" /><div className="row" style={{ gap: 8 }}><select className="select" value={manualStart} onChange={(e) => setManualStart(e.target.value)} data-testid="proposal-manual-start">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select><select className="select" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)} data-testid="proposal-manual-end">{timeOptions.filter((t) => minutes(t) > minutes(manualStart)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select></div></div>}
+        <div className="sheet-title-row"><h3 data-testid="proposal-title">Propose to {selected.parentName}</h3><button className="icon-button" onClick={onClose} data-testid="proposal-close-button"><X size={20} /></button></div>
+        <div className="mini-card stack" data-testid="proposal-readout">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">When</span>
+            <strong data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}, {selected.blocks?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</strong>
+          </div>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="muted">Children</span>
+            <strong data-testid="proposal-children">{ownChild?.first_name || "Your child"} + {selected.childName || selected.parentName}</strong>
+          </div>
         </div>
         <input className="input" value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Location" data-testid="proposal-location-input" />
-        <input className="input" value={activity} onChange={(e) => setActivity(e.target.value)} placeholder="Activity" data-testid="proposal-activity-input" />
-        <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the other parent" data-testid="proposal-notes-input" />
+        <div className="stack" data-testid="proposal-activity-section">
+          <h4 className="section-label">ACTIVITY</h4>
+          <div className="chip-row">{ACTIVITIES.map((a) => <button key={a} className={`chip ${activity === a ? "active" : ""}`} onClick={() => setActivity(a)} data-testid={`proposal-activity-${a.toLowerCase().replace(/\s+/g, "-")}`}>{a}</button>)}</div>
+        </div>
+        {!hasOwnOpenSlot && (
+          <div className="nudge-line" data-testid="proposal-nudge">
+            <span>🗓️</span>
+            <div><strong>{selected.parentName} can't reach you back yet.</strong> Add {ownChild?.first_name || "your child"}'s open time so families can propose to you too.</div>
+          </div>
+        )}
         <button className="button primary" onClick={submit} data-testid="proposal-send-button"><Send size={18} /> Send proposal</button>
       </section>
     </div>
@@ -833,6 +1032,7 @@ function CommunityPage({ user, dashboard, refresh }) {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (location.state?.match) setDrill({ proposalMatch: location.state.match }); }, [location.state]);
+  useEffect(() => { if (location.state?.communityId) setDrill({ communityId: location.state.communityId }); }, [location.state]);
   useEffect(() => {
     const q = searchQuery.trim();
     if (q.length < 2) { setSearchResults([]); return; }
@@ -1509,51 +1709,6 @@ function CancelModal({ playdate, refresh, onClose }) {
           ))}
         </div>
         <button className="button primary" onClick={cancel} data-testid="cancel-submit-button">Confirm cancellation</button>
-      </section>
-    </div>
-  );
-}
-
-function GroupPlaydateModal({ dashboard, refresh, onClose }) {
-  const [selected, setSelected] = useState([]);
-  const [date, setDate] = useState(isoDate(new Date(Date.now() + 86400000 * 3)));
-  const [start, setStart] = useState("15:00");
-  const [end, setEnd] = useState("17:00");
-  const [location, setLocation] = useState("Community playground");
-  const [activity, setActivity] = useState("Group free play");
-  const families = dashboard?.matches?.map((m) => m.parent) || [];
-  const overlays = dashboard?.matches?.filter((m) => selected.includes(m.parent.user_id)).slice(0, 5) || [];
-  const toggle = (id) => setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : prev.length < 6 ? [...prev, id] : prev);
-  const send = async () => {
-    try {
-      await api("/playdates", { method: "POST", body: JSON.stringify({ type: "group", invitee_parent_ids: selected, child_ids: dashboard?.children?.[0] ? [dashboard.children[0].child_id] : [], date, start_time: start, end_time: end, location, activity, min_confirmations: 2, title: "Friend Group Playdate" }) });
-      toast.success("Group proposal sent"); await refresh(); onClose();
-    } catch (error) { toast.error(error.message); }
-  };
-  return (
-    <div className="center-overlay" data-testid="group-modal-overlay">
-      <section className="modal-panel stack" data-testid="group-modal">
-        <div className="sheet-title-row"><h3 data-testid="group-title">New Group Playdate</h3><button className="icon-button" onClick={onClose} data-testid="group-close-button"><X size={20} /></button></div>
-        <div className="chip-row" data-testid="group-family-options">{families.map((f) => <button key={f.user_id} className={`chip ${selected.includes(f.user_id) ? "active" : ""}`} onClick={() => toggle(f.user_id)} data-testid={`group-family-${f.user_id}`}>{f.name}</button>)}</div>
-        {!families.length && <p className="muted" data-testid="group-no-families">Add availability and join communities to surface families.</p>}
-        <div className="group-overlay-card" data-testid="group-calendar-overlay">
-          <div className="family-head"><strong data-testid="group-overlay-title">Calendar overlay</strong><span className="badge amber">Amber = shared opening</span></div>
-          {overlays.length ? overlays.map((match, index) => {
-            const left = ((minutes(match.start_time) - 360) / 900) * 100;
-            const width = ((minutes(match.end_time) - minutes(match.start_time)) / 900) * 100;
-            return (
-              <div className="overlay-row" key={match.match_id} data-testid={`group-overlay-row-${match.parent.user_id}`}>
-                <span data-testid={`group-overlay-name-${match.parent.user_id}`}>{match.parent.name.split(" ")[0]}</span>
-                <div className="overlay-track"><i style={{ left: `${left}%`, width: `${width}%`, opacity: 0.4 + index * 0.08 }} /></div>
-              </div>
-            );
-          }) : <p className="muted" data-testid="group-overlay-empty">Select 2–6 families to compare openings.</p>}
-          {overlays.length >= 2 && <button className="slot-button overlap" type="button" onClick={() => { setDate(overlays[0].date); setStart(overlays[0].start_time); setEnd(overlays[0].end_time); }} data-testid="group-amber-overlap-button">Use amber overlap · {fmtDate(overlays[0].date, { weekday: "short", month: "short", day: "numeric" })} {timeLabel(overlays[0].start_time)}–{timeLabel(overlays[0].end_time)}</button>}
-        </div>
-        <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="group-date-input" />
-        <div className="row" style={{ gap: 8 }}><select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="group-start-select">{timeOptions.map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select><select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="group-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select></div>
-        <input className="input" value={location} onChange={(e) => setLocation(e.target.value)} data-testid="group-location-input" /><input className="input" value={activity} onChange={(e) => setActivity(e.target.value)} data-testid="group-activity-input" />
-        <button className="button primary" onClick={send} disabled={selected.length < 2} data-testid="group-send-button">Send to {selected.length} families</button>
       </section>
     </div>
   );

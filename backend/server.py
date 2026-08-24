@@ -93,6 +93,7 @@ class AvailabilityCreate(BaseModel):
     visibility_mode: str = "everyone"
     visible_to_parent_ids: List[str] = []
     child_ids: List[str] = []
+    recurring_end_date: Optional[str] = None
 
 
 class CommunityCheckRequest(BaseModel):
@@ -155,6 +156,7 @@ class PlaydateCreate(BaseModel):
     notes: str = ""
     min_confirmations: int = 1
     title: Optional[str] = None
+    slot_id: Optional[str] = None
 
 
 class PlaydateResponseAction(BaseModel):
@@ -715,9 +717,21 @@ async def meta():
     return {"interests": INTERESTS, "grades": GRADES}
 
 
+async def auto_pause_stale_slots(parent_id: str) -> bool:
+    cutoff = (datetime.now(timezone.utc) - timedelta(weeks=4)).isoformat()
+    stale = await db.availability_slots.find(
+        {"parent_id": parent_id, "is_recurring": True, "is_paused": False, "last_confirmed_at": {"$lt": cutoff}},
+        {"_id": 0, "slot_id": 1},
+    ).to_list(500)
+    if stale:
+        await db.availability_slots.update_many({"slot_id": {"$in": [s["slot_id"] for s in stale]}}, {"$set": {"is_paused": True}})
+    return bool(stale) or await db.availability_slots.count_documents({"parent_id": parent_id, "is_paused": True}) > 0
+
+
 @api_router.get("/dashboard")
 async def dashboard(user: Dict[str, Any] = Depends(current_user)):
     parent_id = user["user_id"]
+    has_paused_availability = await auto_pause_stale_slots(parent_id)
     children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(50)
     memberships = await db.community_members.find({"parent_id": parent_id}, {"_id": 0}).to_list(100)
     community_ids = [member["community_id"] for member in memberships]
@@ -738,6 +752,7 @@ async def dashboard(user: Dict[str, Any] = Depends(current_user)):
         "notifications": notifications,
         "availability": availability,
         "matches": matches,
+        "has_paused_availability": has_paused_availability,
         "stats": {"playdates_completed": completed_count, "credits_earned": profile["credits"], "families_sharing_with_me": sharing_count, "availability_slots": len([s for s in availability if not s.get("is_paused")])},
         "onboarding": {
             "has_child": len(children) > 0,
@@ -807,6 +822,11 @@ def validate_blocks(blocks: List[AvailabilityBlock]) -> List[Dict[str, str]]:
     return normalized
 
 
+def default_recurring_end_date(from_date: date) -> date:
+    june_30_this_year = date(from_date.year, 6, 30)
+    return june_30_this_year if june_30_this_year >= from_date else date(from_date.year + 1, 6, 30)
+
+
 @api_router.post("/availability")
 async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = Depends(current_user)):
     selected_date = datetime.fromisoformat(payload.date).date()
@@ -815,30 +835,47 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
     blocks = validate_blocks(payload.blocks)
     if payload.visibility_mode not in ["everyone", "manual", "request_only"]:
         raise HTTPException(status_code=400, detail="Invalid visibility mode")
-    if len(payload.child_ids) > 1:
-        raise HTTPException(status_code=400, detail="Availability can only be scoped to a single child")
+
+    if payload.recurring_end_date:
+        end_boundary = datetime.fromisoformat(payload.recurring_end_date).date()
+    else:
+        end_boundary = default_recurring_end_date(selected_date)
+
     dates = [selected_date]
     if payload.recurrence == "weekly":
-        dates = [selected_date + timedelta(days=7 * i) for i in range(53)]
+        dates = []
+        cursor = selected_date
+        while cursor <= end_boundary and len(dates) < 60:
+            dates.append(cursor)
+            cursor += timedelta(days=7)
+
+    child_scopes = [[]] if not payload.child_ids else [[child_id] for child_id in payload.child_ids]
+
     saved = []
     for slot_date in dates:
-        doc = {
-            "slot_id": new_id("slot"),
-            "parent_id": user["user_id"],
-            "date": slot_date.isoformat(),
-            "blocks": blocks,
-            "is_recurring": payload.recurrence == "weekly",
-            "recurrence_rule": f"weekly:{selected_date.weekday()}" if payload.recurrence == "weekly" else "once",
-            "source_date": selected_date.isoformat(),
-            "is_paused": False,
-            "visibility_mode": payload.visibility_mode,
-            "visible_to_parent_ids": payload.visible_to_parent_ids if payload.visibility_mode == "manual" else [],
-            "child_ids": payload.child_ids,
-            "created_at": now_iso(),
-        }
-        await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat(), "child_ids": payload.child_ids})
-        await db.availability_slots.insert_one(doc.copy())
-        saved.append(doc)
+        for scope in child_scopes:
+            doc = {
+                "slot_id": new_id("slot"),
+                "parent_id": user["user_id"],
+                "date": slot_date.isoformat(),
+                "blocks": blocks,
+                "is_recurring": payload.recurrence == "weekly",
+                "recurrence_rule": f"weekly:{selected_date.weekday()}" if payload.recurrence == "weekly" else "once",
+                "recurring_end_date": end_boundary.isoformat() if payload.recurrence == "weekly" else None,
+                "source_date": selected_date.isoformat(),
+                "is_paused": False,
+                "status": "open",
+                "proposal_id": None,
+                "ever_held": False,
+                "visibility_mode": payload.visibility_mode,
+                "visible_to_parent_ids": payload.visible_to_parent_ids if payload.visibility_mode == "manual" else [],
+                "child_ids": scope,
+                "created_at": now_iso(),
+                "last_confirmed_at": now_iso(),
+            }
+            await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat(), "child_ids": scope})
+            await db.availability_slots.insert_one(doc.copy())
+            saved.append(doc)
     return {"saved": saved[:60], "count": len(saved)}
 
 
@@ -1339,19 +1376,39 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
     peers = await common_community_parent_ids(parent_id)
     start = date.today().isoformat()
     end = (date.today() + timedelta(days=21)).isoformat()
-    feed = []
+    rows = []
     for peer_id in peers:
         parent = await public_parent(peer_id)
+        if not parent:
+            continue
         children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
         slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
-        if parent and slots:
-            feed.append({"parent": parent, "children": children, "slots": slots})
-    return feed
+        family_rows = []
+        for slot in slots:
+            scoped_ids = slot.get("child_ids") or []
+            target_children = [c for c in children if c["child_id"] in scoped_ids] if scoped_ids else children
+            for child in target_children:
+                family_rows.append({
+                    "family_id": peer_id,
+                    "parent_name": parent["name"],
+                    "parent_picture": parent.get("picture", ""),
+                    "child_id": child["child_id"],
+                    "child_name": child["first_name"],
+                    "grade": child.get("grade"),
+                    "slot_id": slot["slot_id"],
+                    "date": slot["date"],
+                    "slot_time": slot.get("blocks", []),
+                    "status": slot.get("status", "open"),
+                })
+        for row in family_rows:
+            row["family_total_slots"] = len(family_rows)
+        rows.extend(family_rows)
+    return rows
 
 
 @api_router.get("/community-feed")
 async def community_feed(user: Dict[str, Any] = Depends(current_user)):
-    return {"families": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"])}
+    return {"rows": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"])}
 
 
 @api_router.get("/community-members")
@@ -1446,6 +1503,10 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         "created_at": now_iso(),
     }
     await db.playdates.insert_one(playdate.copy())
+    if payload.slot_id:
+        slot = await db.availability_slots.find_one({"slot_id": payload.slot_id}, {"_id": 0})
+        if slot and slot["parent_id"] in payload.invitee_parent_ids:
+            await db.availability_slots.update_one({"slot_id": payload.slot_id}, {"$set": {"status": "held", "proposal_id": playdate_id, "ever_held": True}})
     for invitee in payload.invitee_parent_ids:
         await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": invitee, "dismissal_type": "dont_suggest_again"})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
@@ -1484,6 +1545,7 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
     elif payload.action == "decline":
         await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
         await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled"}})
+        await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
             await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
@@ -1515,6 +1577,7 @@ async def cancel_playdate(playdate_id: str, payload: CancelRequest, user: Dict[s
     if not playdate:
         raise HTTPException(status_code=404, detail="Playdate not found")
     await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled", "cancellation_reason": payload.reason, "cancelled_by": user["user_id"], "cancelled_at": now_iso()}})
+    await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
     participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
     for participant in participants:
         await notify_parent(participant["parent_id"], "Playdate cancelled", f"{user['name']} cancelled: {payload.reason}.", "playdate", playdate_id)
