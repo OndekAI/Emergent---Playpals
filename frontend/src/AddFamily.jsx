@@ -1,33 +1,58 @@
-import { useState, useEffect } from "react";
-import { ChevronLeft } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { ChevronLeft, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
-export default function AddFamily({ api, GRADES, onClose }) {
+export default function AddFamily({ api, onClose }) {
   const [masters, setMasters] = useState([]);
-  const [form, setForm] = useState({
-    parent_name: "", parent_email: "",
-    community_id: "", grade_community_id: "",
-    child_first_name: "", child_age: "", child_grade: "",
-  });
+  const [parentName, setParentName] = useState("");
+  const [parentEmail, setParentEmail] = useState("");
+  const [communityId, setCommunityId] = useState("");
+  const [children, setChildren] = useState([]);
+  const nextKey = useRef(0);
 
   useEffect(() => {
     api("/admin/communities/approved").then(setMasters).catch(() => toast.error("Couldn't load communities"));
   }, [api]);
 
-  const selectedMaster = masters.find((m) => m.community_id === form.community_id);
-  const requiredFilled = form.parent_name && form.parent_email && form.community_id && form.grade_community_id;
+  const selectedMaster = masters.find((m) => m.community_id === communityId);
+  const requiredFilled = parentName && parentEmail && communityId;
+
+  const addChildRow = () => {
+    nextKey.current += 1;
+    setChildren((prev) => [...prev, { key: nextKey.current, first_name: "", age: "", grade_community_id: "" }]);
+  };
+
+  const updateChild = (key, field, value) => {
+    setChildren((prev) => prev.map((c) => (c.key === key ? { ...c, [field]: value } : c)));
+  };
+
+  const removeChild = (key) => {
+    setChildren((prev) => prev.filter((c) => c.key !== key));
+  };
 
   const submit = async () => {
     try {
       await api("/admin/add-family", {
         method: "POST",
         body: JSON.stringify({
-          ...form,
-          child_age: form.child_age ? parseInt(form.child_age, 10) : null,
+          parent_name: parentName,
+          parent_email: parentEmail,
+          community_id: communityId,
+          children: children
+            .filter((c) => c.first_name && c.grade_community_id)
+            .map((c) => ({
+              first_name: c.first_name,
+              age: c.age ? parseInt(c.age, 10) : null,
+              grade: selectedMaster?.subs.find((s) => s.community_id === c.grade_community_id)?.name || "",
+              grade_community_id: c.grade_community_id,
+            })),
         }),
       });
       toast.success("Family added — ready for the next one");
-      setForm({ parent_name: "", parent_email: "", community_id: "", grade_community_id: "", child_first_name: "", child_age: "", child_grade: "" });
+      setParentName("");
+      setParentEmail("");
+      setCommunityId("");
+      setChildren([]);
     } catch (error) {
       toast.error(error.message);
     }
@@ -43,39 +68,63 @@ export default function AddFamily({ api, GRADES, onClose }) {
         <div />
       </header>
       <main className="main-content stack">
-        <p className="muted">Adds this family directly to a community and grade — no invite link or approval needed.</p>
+        <p className="muted">Adds this family directly to a community — no invite link or approval needed. Each child joins their own grade.</p>
 
         <section className="card stack" data-testid="add-family-parent-card">
           <h2 className="section-title">Parent</h2>
-          <input className="input" placeholder="Parent name" value={form.parent_name}
-            onChange={(e) => setForm({ ...form, parent_name: e.target.value })} data-testid="add-family-parent-name-input" />
-          <input className="input" placeholder="Parent email" value={form.parent_email}
-            onChange={(e) => setForm({ ...form, parent_email: e.target.value })} data-testid="add-family-parent-email-input" />
-          <select className="select" value={form.community_id}
-            onChange={(e) => setForm({ ...form, community_id: e.target.value, grade_community_id: "" })} data-testid="add-family-community-select">
+          <input className="input" placeholder="Parent name" value={parentName}
+            onChange={(e) => setParentName(e.target.value)} data-testid="add-family-parent-name-input" />
+          <input className="input" placeholder="Parent email" value={parentEmail}
+            onChange={(e) => setParentEmail(e.target.value)} data-testid="add-family-parent-email-input" />
+          <select className="select" value={communityId}
+            onChange={(e) => { setCommunityId(e.target.value); setChildren([]); }} data-testid="add-family-community-select">
             <option value="">Select community</option>
             {masters.map((m) => <option key={m.community_id} value={m.community_id}>{m.name}</option>)}
           </select>
-          {selectedMaster && (
-            <select className="select" value={form.grade_community_id}
-              onChange={(e) => setForm({ ...form, grade_community_id: e.target.value })} data-testid="add-family-grade-select">
-              <option value="">Select grade</option>
-              {selectedMaster.subs.map((s) => <option key={s.community_id} value={s.community_id}>{s.name}</option>)}
-            </select>
-          )}
         </section>
 
         <section className="card stack" data-testid="add-family-child-card">
-          <h2 className="section-title">Child (optional)</h2>
-          <input className="input" placeholder="Child first name" value={form.child_first_name}
-            onChange={(e) => setForm({ ...form, child_first_name: e.target.value })} data-testid="add-family-child-name-input" />
-          <input className="input" placeholder="Child age" value={form.child_age}
-            onChange={(e) => setForm({ ...form, child_age: e.target.value })} data-testid="add-family-child-age-input" />
-          <select className="select" value={form.child_grade}
-            onChange={(e) => setForm({ ...form, child_grade: e.target.value })} data-testid="add-family-child-grade-select">
-            <option value="">Select grade</option>
-            {GRADES.map((g) => <option key={g} value={g}>{g}</option>)}
-          </select>
+          <div className="section-row">
+            <h2 className="section-title">Children (optional)</h2>
+            {selectedMaster && (
+              <button className="icon-button" onClick={addChildRow} data-testid="add-family-add-child-button">
+                <Plus size={18} />
+              </button>
+            )}
+          </div>
+          {!selectedMaster && <p className="muted">Select a community first to add children.</p>}
+          {children.map((child) => (
+            <div className="mini-card stack" key={child.key} data-testid={`add-family-child-row-${child.key}`}>
+              <div className="row" style={{ gap: 8 }}>
+                <input
+                  className="input"
+                  placeholder="Child first name"
+                  value={child.first_name}
+                  onChange={(e) => updateChild(child.key, "first_name", e.target.value)}
+                  data-testid={`add-family-child-name-${child.key}`}
+                />
+                <button className="icon-button" onClick={() => removeChild(child.key)} data-testid={`add-family-remove-child-${child.key}`}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+              <input
+                className="input"
+                placeholder="Child age"
+                value={child.age}
+                onChange={(e) => updateChild(child.key, "age", e.target.value)}
+                data-testid={`add-family-child-age-${child.key}`}
+              />
+              <select
+                className="select"
+                value={child.grade_community_id}
+                onChange={(e) => updateChild(child.key, "grade_community_id", e.target.value)}
+                data-testid={`add-family-child-grade-${child.key}`}
+              >
+                <option value="">Select grade</option>
+                {selectedMaster?.subs.map((s) => <option key={s.community_id} value={s.community_id}>{s.name}</option>)}
+              </select>
+            </div>
+          ))}
         </section>
 
         <button className="button primary" disabled={!requiredFilled} onClick={submit} data-testid="add-family-submit">

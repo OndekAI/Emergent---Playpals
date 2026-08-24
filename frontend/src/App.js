@@ -1530,7 +1530,7 @@ function ProfilePage({ user, dashboard, refresh }) {
       {showChild && <ChildModal onClose={() => setShowChild(false)} refresh={refresh} />}
       {editingChild && <ChildModal child={editingChild} onClose={() => setEditingChild(null)} refresh={refresh} />}
       {showParentEdit && <ParentProfileModal user={user} refresh={refresh} onClose={() => setShowParentEdit(false)} />}
-      {showAddFamily && <AddFamily api={api} GRADES={GRADES} onClose={() => setShowAddFamily(false)} />}
+      {showAddFamily && <AddFamily api={api} onClose={() => setShowAddFamily(false)} />}
     </AppLayout>
   );
 }

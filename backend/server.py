@@ -124,14 +124,18 @@ class CommunityDeclineRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class AddFamilyChildInput(BaseModel):
+    first_name: str
+    age: Optional[int] = None
+    grade: str
+    grade_community_id: str
+
+
 class AddFamilyRequest(BaseModel):
     parent_name: str
     parent_email: EmailStr
     community_id: str
-    grade_community_id: str
-    child_first_name: Optional[str] = None
-    child_age: Optional[int] = None
-    child_grade: Optional[str] = None
+    children: List[AddFamilyChildInput] = []
 
 
 class TagSponsorRequest(BaseModel):
@@ -1106,7 +1110,8 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
     await db.users.insert_one(user.copy())
     await add_credit(user["user_id"], 0, "account_created", user["user_id"])
 
-    for cid in [payload.community_id, payload.grade_community_id]:
+    community_ids = {payload.community_id} | {child.grade_community_id for child in payload.children}
+    for cid in community_ids:
         community = await db.communities.find_one({"community_id": cid}, {"_id": 0})
         if not community:
             continue
@@ -1121,14 +1126,16 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
             "provisional_expires_at": None,
         })
 
-    child_id = None
-    if payload.child_first_name and payload.child_grade:
+    child_ids = []
+    for child_input in payload.children:
+        if not child_input.first_name:
+            continue
         child = {
             "child_id": new_id("child"),
             "parent_id": user["user_id"],
-            "first_name": payload.child_first_name,
-            "age": payload.child_age or 0,
-            "grade": payload.child_grade,
+            "first_name": child_input.first_name,
+            "age": child_input.age or 0,
+            "grade": child_input.grade,
             "school_id": None,
             "interests": [],
             "allergies": "",
@@ -1136,14 +1143,14 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
             "photo_url": None,
             "status": "active",
             "is_alumni": False,
-            "alumni_class_year": grade_class_year(payload.child_grade),
+            "alumni_class_year": grade_class_year(child_input.grade),
             "claimed": False,
             "created_at": now_iso(),
         }
         await db.children.insert_one(child.copy())
-        child_id = child["child_id"]
+        child_ids.append(child["child_id"])
 
-    return {"parent_id": user["user_id"], "child_id": child_id, "status": "added"}
+    return {"parent_id": user["user_id"], "child_ids": child_ids, "status": "added"}
 
 
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
