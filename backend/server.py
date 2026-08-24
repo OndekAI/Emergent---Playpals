@@ -1290,7 +1290,7 @@ async def sponsor_requests(user: Dict[str, Any] = Depends(current_user)):
     for row in requests_list:
         row["community"] = await db.communities.find_one({"community_id": row["community_id"]}, {"_id": 0})
         row["parent"] = await db.users.find_one({"user_id": row["parent_id"]}, {"_id": 0})
-        row["children"] = await db.children.find({"parent_id": row["parent_id"]}, {"_id": 0}).to_list(10)
+        row["children"] = await db.children.find({"parent_id": row["parent_id"], "claimed": {"$ne": False}}, {"_id": 0}).to_list(10)
     return requests_list
 
 
@@ -1329,7 +1329,7 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
     feed = []
     for peer_id in peers:
         parent = await public_parent(peer_id)
-        children = await db.children.find({"parent_id": peer_id}, {"_id": 0, "allergies": 0}).to_list(10)
+        children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
         slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
         if parent and slots:
             feed.append({"parent": parent, "children": children, "slots": slots})
@@ -1369,7 +1369,7 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
                     end = min(minutes(own_block["end"]), minutes(peer_block["end"]))
                     if end - start >= 90:
                         parent = await public_parent(peer_id)
-                        peer_children = await db.children.find({"parent_id": peer_id}, {"_id": 0, "allergies": 0}).to_list(10)
+                        peer_children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
                         own_children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(10)
                         interest_overlap = len(set((peer_children[0].get("interests", []) if peer_children else [])) & set((own_children[0].get("interests", []) if own_children else [])))
                         score = min(96, 55 + min(25, int((end - start - 90) / 3)) + interest_overlap * 6)
@@ -1401,7 +1401,7 @@ async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
         participants = await db.playdate_participants.find({"playdate_id": playdate["playdate_id"]}, {"_id": 0}).to_list(20)
         for participant in participants:
             participant["parent"] = await public_parent(participant["parent_id"])
-            participant["children"] = await db.children.find({"child_id": {"$in": participant.get("child_ids", [])}}, {"_id": 0}).to_list(10)
+            participant["children"] = await db.children.find({"child_id": {"$in": participant.get("child_ids", [])}, "claimed": {"$ne": False}}, {"_id": 0}).to_list(10)
         playdate["participants"] = participants
     return playdates
 
