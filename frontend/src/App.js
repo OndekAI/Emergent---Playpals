@@ -32,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
+import AddFamily from "./AddFamily";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -1447,6 +1448,7 @@ function ProfilePage({ user, dashboard, refresh }) {
   const [showChild, setShowChild] = useState(false);
   const [editingChild, setEditingChild] = useState(null);
   const [showParentEdit, setShowParentEdit] = useState(false);
+  const [showAddFamily, setShowAddFamily] = useState(false);
   const logout = async () => { await api("/auth/logout", { method: "POST" }); window.location.href = "/login"; };
   return (
     <AppLayout title="Profile" user={user}>
@@ -1484,11 +1486,18 @@ function ProfilePage({ user, dashboard, refresh }) {
         <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email {user?.notification_preferences?.email ? "on" : "off"}</span><span className="badge blue">Push {user?.notification_preferences?.push ? "on" : "off"}</span><span className="badge amber">SMS {user?.notification_preferences?.sms ? "on" : "off"}</span></div></section>
         {user?.is_admin && <AdminPendingCommunities />}
         {user?.is_admin && <AdminApprovedCommunities />}
+        {/* Cosmetic only — real enforcement is require_admin on POST /admin/add-family */}
+        {user?.is_admin && (
+          <button className="card admin-row" onClick={() => setShowAddFamily(true)} data-testid="admin-add-family-button">
+            Admin — Add a Family
+          </button>
+        )}
         <button className="button secondary" onClick={logout} data-testid="logout-button">Log out</button>
       </div>
       {showChild && <ChildModal onClose={() => setShowChild(false)} refresh={refresh} />}
       {editingChild && <ChildModal child={editingChild} onClose={() => setEditingChild(null)} refresh={refresh} />}
       {showParentEdit && <ParentProfileModal user={user} refresh={refresh} onClose={() => setShowParentEdit(false)} />}
+      {showAddFamily && <AddFamily api={api} GRADES={GRADES} onClose={() => setShowAddFamily(false)} />}
     </AppLayout>
   );
 }

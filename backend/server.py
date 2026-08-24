@@ -124,6 +124,16 @@ class CommunityDeclineRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class AddFamilyRequest(BaseModel):
+    parent_name: str
+    parent_email: EmailStr
+    community_id: str
+    grade_community_id: str
+    child_first_name: Optional[str] = None
+    child_age: Optional[int] = None
+    child_grade: Optional[str] = None
+
+
 class TagSponsorRequest(BaseModel):
     sponsor_id: str
 
@@ -353,6 +363,9 @@ async def upsert_user(email: str, name: Optional[str] = None, picture: Optional[
     existing = await db.users.find_one({"email": normalized}, {"_id": 0})
     if existing:
         updates = {"updated_at": now_iso()}
+        if existing.get("status") == "pre_added":
+            updates["status"] = "active"
+            await db.children.update_many({"parent_id": existing["user_id"]}, {"$set": {"claimed": True}})
         if name and not existing.get("name"):
             updates["name"] = name
         if picture:
@@ -397,7 +410,7 @@ async def credit_total(parent_id: str) -> int:
 
 
 async def children_for_parent(parent_id: str) -> List[Dict[str, Any]]:
-    return await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(20)
+    return await db.children.find({"parent_id": parent_id, "claimed": {"$ne": False}}, {"_id": 0}).to_list(20)
 
 
 async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
@@ -1068,6 +1081,69 @@ async def list_approved_communities(admin: Dict[str, Any] = Depends(require_admi
         master["subs"] = [await enrich(sub) for sub in subs]
         result.append(master)
     return result
+
+
+@api_router.post("/admin/add-family")
+async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    normalized = clean_email(payload.parent_email)
+    existing = await db.users.find_one({"email": normalized}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=409, detail="This parent already has an account")
+
+    user = {
+        "user_id": new_id("user"),
+        "email": normalized,
+        "name": payload.parent_name,
+        "picture": "",
+        "neighborhood": "",
+        "contact_preference": "email",
+        "notification_preferences": {"email": True, "push": True, "sms": False},
+        "phone": "",
+        "status": "pre_added",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.users.insert_one(user.copy())
+    await add_credit(user["user_id"], 0, "account_created", user["user_id"])
+
+    for cid in [payload.community_id, payload.grade_community_id]:
+        community = await db.communities.find_one({"community_id": cid}, {"_id": 0})
+        if not community:
+            continue
+        await db.community_members.insert_one({
+            "membership_id": new_id("member"),
+            "community_id": cid,
+            "parent_id": user["user_id"],
+            "status": "active",
+            "sponsor_id": None,
+            "availability_visibility_mode": "everyone" if community.get("type") in ["school", "grade", "extracurricular"] else "request_only",
+            "joined_at": now_iso(),
+            "provisional_expires_at": None,
+        })
+
+    child_id = None
+    if payload.child_first_name and payload.child_grade:
+        child = {
+            "child_id": new_id("child"),
+            "parent_id": user["user_id"],
+            "first_name": payload.child_first_name,
+            "age": payload.child_age or 0,
+            "grade": payload.child_grade,
+            "school_id": None,
+            "interests": [],
+            "allergies": "",
+            "notes": "",
+            "photo_url": None,
+            "status": "active",
+            "is_alumni": False,
+            "alumni_class_year": grade_class_year(payload.child_grade),
+            "claimed": False,
+            "created_at": now_iso(),
+        }
+        await db.children.insert_one(child.copy())
+        child_id = child["child_id"]
+
+    return {"parent_id": user["user_id"], "child_id": child_id, "status": "added"}
 
 
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
