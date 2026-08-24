@@ -329,9 +329,11 @@ function HomePage({ user, dashboard, refresh }) {
   const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered"].includes(p.status)).slice(0, 3);
   const [localMatches, setLocalMatches] = useState(dashboard?.matches || []);
   const [sponsorRequests, setSponsorRequests] = useState([]);
+  const [shareRequests, setShareRequests] = useState([]);
 
   useEffect(() => {
     api("/sponsor-requests").then(setSponsorRequests).catch(() => setSponsorRequests([]));
+    api("/availability-share-requests/pending").then(setShareRequests).catch(() => setShareRequests([]));
   }, [dashboard]);
 
   useEffect(() => setLocalMatches(dashboard?.matches || []), [dashboard?.matches]);
@@ -369,6 +371,13 @@ function HomePage({ user, dashboard, refresh }) {
           <section className="card stack" data-testid="sponsor-requests-card">
             <span className="badge blue" data-testid="sponsor-requests-badge">Sponsor requests</span>
             {sponsorRequests.map((request) => <SponsorRequestCard key={request.membership_id} request={request} onResponded={() => { setSponsorRequests((prev) => prev.filter((r) => r.membership_id !== request.membership_id)); refresh(); }} />)}
+          </section>
+        )}
+
+        {!!shareRequests.length && (
+          <section className="card stack" data-testid="share-requests-card">
+            <span className="badge blue" data-testid="share-requests-badge">Availability share requests</span>
+            {shareRequests.map((request) => <ShareRequestCard key={request.request_id} request={request} onResponded={() => { setShareRequests((prev) => prev.filter((r) => r.request_id !== request.request_id)); refresh(); }} />)}
           </section>
         )}
 
@@ -444,6 +453,28 @@ function SponsorRequestCard({ request, onResponded }) {
       <div className="proposal-actions">
         <button className="button sage small" onClick={() => respond("approve")} data-testid={`sponsor-approve-${request.membership_id}`}>Yes, approve</button>
         <button className="button secondary small" onClick={() => respond("decline")} data-testid={`sponsor-decline-${request.membership_id}`}>No</button>
+      </div>
+    </div>
+  );
+}
+
+function ShareRequestCard({ request, onResponded }) {
+  const respond = async (action) => {
+    try {
+      await api(`/availability-share-requests/${request.request_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
+      toast.success(action === "approve" ? "Now sharing availability" : "Request declined");
+      onResponded();
+    } catch (error) { toast.error(error.message); }
+  };
+  return (
+    <div className="mini-card stack" data-testid={`share-request-${request.request_id}`}>
+      <div>
+        <strong data-testid={`share-request-parent-${request.request_id}`}>{request.requester?.name}</strong>
+        <p className="muted" data-testid={`share-request-detail-${request.request_id}`}>wants to share availability with you</p>
+      </div>
+      <div className="proposal-actions">
+        <button className="button sage small" onClick={() => respond("approve")} data-testid={`share-approve-${request.request_id}`}>Yes, share</button>
+        <button className="button secondary small" onClick={() => respond("decline")} data-testid={`share-decline-${request.request_id}`}>No</button>
       </div>
     </div>
   );
@@ -1518,7 +1549,7 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
         )}
       </div>
       {showChat && <ChatModal playdate={playdate} user={user} onClose={() => setShowChat(false)} />}
-      {showReschedule && <RescheduleModal playdate={playdate} refresh={refresh} onClose={() => setShowReschedule(false)} />}
+      {showReschedule && <RescheduleModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
       {showCancel && <CancelModal playdate={playdate} refresh={refresh} onClose={() => setShowCancel(false)} />}
       {showDecline && <DeclineOrSuggestModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowDecline(false)} />}
@@ -1526,13 +1557,12 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   );
 }
 
-function RescheduleModal({ playdate, refresh, onClose }) {
-  const [date, setDate] = useState(playdate.date);
-  const [start, setStart] = useState(playdate.start_time);
-  const [end, setEnd] = useState(playdate.end_time);
-  const submit = async () => {
+function RescheduleModal({ playdate, dashboard, refresh, onClose }) {
+  const today = isoDate(new Date());
+  const upcomingSlots = (dashboard?.availability || []).filter((slot) => slot.date >= today);
+  const submit = async (rescheduleDate, rescheduleStart, rescheduleEnd) => {
     try {
-      await api(`/playdates/${playdate.playdate_id}/reschedule`, { method: "POST", body: JSON.stringify({ date, start_time: start, end_time: end }) });
+      await api(`/playdates/${playdate.playdate_id}/reschedule`, { method: "POST", body: JSON.stringify({ date: rescheduleDate, start_time: rescheduleStart, end_time: rescheduleEnd }) });
       toast.success("Reschedule request sent");
       await refresh();
       onClose();
@@ -1542,12 +1572,23 @@ function RescheduleModal({ playdate, refresh, onClose }) {
     <div className="center-overlay" data-testid="reschedule-modal-overlay">
       <section className="modal-panel stack" data-testid="reschedule-modal">
         <div className="sheet-title-row"><h3 data-testid="reschedule-title">Reschedule</h3><button className="icon-button" onClick={onClose} data-testid="reschedule-close-button"><X size={20} /></button></div>
-        <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="reschedule-date-input" />
-        <div className="row" style={{ gap: 8 }}>
-          <select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="reschedule-start-select">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
-          <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="reschedule-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
-        </div>
-        <button className="button primary" onClick={submit} data-testid="reschedule-submit-button">Send reschedule request</button>
+        {upcomingSlots.length ? (
+          <div className="stack" data-testid="reschedule-slots">
+            <h4 className="section-label">FROM YOUR AVAILABILITY</h4>
+            {upcomingSlots.slice(0, 8).flatMap((slot) => (slot.blocks || []).map((block, i) => (
+              <button
+                key={`${slot.date}-${i}`}
+                className="slot-pill"
+                onClick={() => submit(slot.date, block.start, block.end)}
+                data-testid={`reschedule-slot-${slot.date}-${i}`}
+              >
+                {fmtDate(slot.date, { weekday: "short", month: "short", day: "numeric" })} · {timeLabel(block.start)}–{timeLabel(block.end)}
+              </button>
+            )))}
+          </div>
+        ) : (
+          <p className="muted" data-testid="reschedule-no-availability">You don't have any open time set yet — add availability first so you can suggest a real time your kid is actually free.</p>
+        )}
       </section>
     </div>
   );

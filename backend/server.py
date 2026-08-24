@@ -482,6 +482,24 @@ async def families_are_sharing(parent_a: str, parent_b: str) -> bool:
     return bool(share)
 
 
+async def visible_slots_for_viewer(slots: List[Dict[str, Any]], viewer_id: str, owner_id: str) -> List[Dict[str, Any]]:
+    visible = []
+    sharing = None
+    for slot in slots:
+        mode = slot.get("visibility_mode", "everyone")
+        if mode == "everyone":
+            visible.append(slot)
+        elif mode == "manual":
+            if viewer_id in (slot.get("visible_to_parent_ids") or []):
+                visible.append(slot)
+        elif mode == "request_only":
+            if sharing is None:
+                sharing = await families_are_sharing(viewer_id, owner_id)
+            if sharing:
+                visible.append(slot)
+    return visible
+
+
 async def create_session(user_id: str, response: Response, session_token: Optional[str] = None) -> str:
     token = session_token or f"sess_{secrets.token_urlsafe(36)}"
     expires = datetime.now(timezone.utc) + timedelta(days=30)
@@ -1311,6 +1329,14 @@ async def request_availability_share(payload: AvailabilityShareRequestCreate, us
     return request_doc
 
 
+@api_router.get("/availability-share-requests/pending")
+async def pending_availability_share_requests(user: Dict[str, Any] = Depends(current_user)):
+    requests_list = await db.availability_share_requests.find({"target_parent_id": user["user_id"], "status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    for row in requests_list:
+        row["requester"] = await public_parent(row["requester_parent_id"])
+    return [row for row in requests_list if row["requester"]]
+
+
 @api_router.post("/availability-share-requests/{request_id}/respond")
 async def respond_availability_share(request_id: str, payload: AvailabilityShareResponse, user: Dict[str, Any] = Depends(current_user)):
     share = await db.availability_share_requests.find_one({"request_id": request_id, "target_parent_id": user["user_id"], "status": "pending"}, {"_id": 0})
@@ -1382,7 +1408,8 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
         if not parent:
             continue
         children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
-        slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
+        raw_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
+        slots = await visible_slots_for_viewer(raw_slots, parent_id, peer_id)
         family_rows = []
         for slot in slots:
             scoped_ids = slot.get("child_ids") or []
@@ -1431,7 +1458,8 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     for peer_id in peers:
         if await match_pair_suppressed(parent_id, peer_id):
             continue
-        peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
+        raw_peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
+        peer_slots = await visible_slots_for_viewer(raw_peer_slots, parent_id, peer_id)
         for slot in peer_slots:
             for own_block in own_by_date.get(slot["date"], []):
                 for peer_block in slot.get("blocks", []):
