@@ -853,6 +853,7 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
 
     saved = []
     for slot_date in dates:
+        await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat()})
         for scope in child_scopes:
             doc = {
                 "slot_id": new_id("slot"),
@@ -873,7 +874,6 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
                 "created_at": now_iso(),
                 "last_confirmed_at": now_iso(),
             }
-            await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": slot_date.isoformat(), "child_ids": scope})
             await db.availability_slots.insert_one(doc.copy())
             saved.append(doc)
     return {"saved": saved[:60], "count": len(saved)}
@@ -885,8 +885,8 @@ async def list_availability(user: Dict[str, Any] = Depends(current_user)):
 
 
 @api_router.delete("/availability/{date_value}")
-async def remove_availability(date_value: str, child_id: Optional[str] = None, user: Dict[str, Any] = Depends(current_user)):
-    await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value, "child_ids": [child_id] if child_id else []})
+async def remove_availability(date_value: str, user: Dict[str, Any] = Depends(current_user)):
+    await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value})
     return {"ok": True}
 
 

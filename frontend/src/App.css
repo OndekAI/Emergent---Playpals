@@ -623,7 +623,17 @@
 }
 @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 .drag-handle { width: 54px; height: 5px; border-radius: 999px; background: rgba(140,110,110,.25); margin: 0 auto 14px; }
-.sheet-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.sheet-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: -12px;
+    margin: -12px -20px 14px;
+    padding: 12px 20px 10px;
+    background: #fff;
+    z-index: 5;
+}
 .sheet-title-row h3 { margin: 0; font-family: "Fraunces", serif; font-size: 18px; font-weight: 600; }
 .icon-button { width: 42px; height: 42px; border-radius: 14px; border: 0; background: rgba(140,110,110,.10); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .time-block { gap: 8px; margin-bottom: 10px; }

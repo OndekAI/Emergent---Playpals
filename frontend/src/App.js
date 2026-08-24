@@ -91,6 +91,8 @@ const blocksToChips = (blocks) => {
 const GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"];
 const INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"];
 const ACTIVITIES = ["Park", "Our place", "Their place", "Swimming", "Soft play", "Free play"];
+const CHILD_COLORS = ["var(--terracotta)", "var(--blue)", "var(--sage)", "var(--amber)"];
+const childColor = (index) => CHILD_COLORS[index % CHILD_COLORS.length];
 
 const api = async (path, options = {}) => {
   const res = await fetch(`${API}${path}`, {
@@ -458,7 +460,7 @@ const mostRecentSlot = (availability) => {
   return sorted[0] || null;
 };
 
-function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
+function DaySheet({ selectedDate, availability, onClose, onSaved, children, activeChildId }) {
   const dateSlots = availability.filter((slot) => slot.date === isoDate(selectedDate));
   const existing = dateSlots[0] || null;
   const lastUsed = existing || mostRecentSlot(availability);
@@ -466,7 +468,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
     children.length
       ? (dateSlots.length
           ? children.filter((c) => dateSlots.some((s) => !s.child_ids?.length || s.child_ids.includes(c.child_id))).map((c) => c.child_id)
-          : children.map((c) => c.child_id))
+          : (activeChildId && children.some((c) => c.child_id === activeChildId) ? [activeChildId] : children.map((c) => c.child_id)))
       : []
   ));
   const [chips, setChips] = useState(() => (existing?.blocks?.length ? blocksToChips(existing.blocks) : new Set(["15:00", "15:30", "16:00", "16:30"])));
@@ -541,9 +543,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
 
   const doRemove = async () => {
     try {
-      const childId = existing?.child_ids?.[0];
-      const query = childId ? `?child_id=${childId}` : "";
-      await api(`/availability/${isoDate(selectedDate)}${query}`, { method: "DELETE" });
+      await api(`/availability/${isoDate(selectedDate)}`, { method: "DELETE" });
       toast.success("Removed");
       await onSaved();
       onClose();
@@ -553,7 +553,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
   };
 
   const remove = () => {
-    if (existing?.ever_held) {
+    if (dateSlots.some((s) => s.ever_held)) {
       setConfirmDelete(true);
     } else {
       doRemove();
@@ -584,7 +584,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
               <section className="stack" data-testid="availability-child-section">
                 <h4 className="section-label">WHO'S FREE</h4>
                 <div className="stack" style={{ gap: 8 }}>
-                  {children.map((child) => {
+                  {children.map((child, index) => {
                     const checked = checkedIds.has(child.child_id);
                     return (
                       <button
@@ -594,7 +594,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children }) {
                         onClick={() => toggleChild(child.child_id)}
                         data-testid={`availability-child-${child.child_id}-button`}
                       >
-                        <div className="avatar-circle" style={{ width: 36, height: 36 }}>{child.first_name?.[0]?.toUpperCase()}</div>
+                        <div className="avatar-circle" style={{ width: 36, height: 36, background: childColor(index) }}>{child.first_name?.[0]?.toUpperCase()}</div>
                         <strong>{child.first_name}</strong>
                         {checked && <Check size={18} data-testid={`availability-child-checked-${child.child_id}`} />}
                       </button>
@@ -745,7 +745,7 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate, activeCh
       </div>
       <p className="muted" style={{ fontSize: 12 }}>Tap any date to set open time. Recurring slots pause on their own after four quiet weeks.</p>
       {onPastPlaydates && <button className="text-link" onClick={onPastPlaydates} data-testid="past-playdates-link">Past playdates ›</button>}
-      {selectedDate && <DaySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} />}
+      {selectedDate && <DaySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} activeChildId={activeChildId} />}
     </section>
   );
 }
