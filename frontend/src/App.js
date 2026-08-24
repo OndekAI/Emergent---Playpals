@@ -1027,6 +1027,8 @@ function JoinViaLinkScreen({ user, refresh }) {
   const [members, setMembers] = useState([]);
   const [sponsorQuery, setSponsorQuery] = useState("");
   const [taggedId, setTaggedId] = useState(null);
+  const [grades, setGrades] = useState([]);
+  const [joinedGradeIds, setJoinedGradeIds] = useState([]);
 
   useEffect(() => {
     let active = true;
@@ -1046,6 +1048,7 @@ function JoinViaLinkScreen({ user, refresh }) {
       await refresh();
       const detail = await api(`/communities/${community.community_id}`);
       setMembers(detail.members || []);
+      setGrades(detail.grades || []);
       setJoined(true);
     } catch (err) {
       toast.error(err.message);
@@ -1059,6 +1062,15 @@ function JoinViaLinkScreen({ user, refresh }) {
       await api(`/communities/${community.community_id}/tag-sponsor`, { method: "POST", body: JSON.stringify({ sponsor_id: memberId }) });
       setTaggedId(memberId);
       toast.success("Thanks for letting them know!");
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const joinGrade = async (gradeId) => {
+    try {
+      await api("/communities/join", { method: "POST", body: JSON.stringify({ community_id: gradeId }) });
+      setJoinedGradeIds((prev) => [...prev, gradeId]);
     } catch (err) {
       toast.error(err.message);
     }
@@ -1106,6 +1118,27 @@ function JoinViaLinkScreen({ user, refresh }) {
                     {taggedId === m.user_id ? `✓ ${m.name}` : m.name}
                   </button>
                 ))}
+              </div>
+            )}
+            {community.type === "school" && grades.length > 0 && (
+              <div className="stack" data-testid="join-link-grades">
+                <p className="muted">Also join a grade?</p>
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  {grades.map((g) => {
+                    const isJoined = joinedGradeIds.includes(g.community_id);
+                    return (
+                      <button
+                        key={g.community_id}
+                        className="button secondary"
+                        onClick={() => joinGrade(g.community_id)}
+                        disabled={isJoined}
+                        data-testid={`join-link-grade-option-${g.community_id}`}
+                      >
+                        {isJoined ? `✓ ${g.name}` : g.name}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
             <button className="button primary" onClick={finish} data-testid="join-link-continue-button">
