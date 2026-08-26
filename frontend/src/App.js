@@ -326,7 +326,7 @@ function OnboardingCard({ dashboard, navigate }) {
 
 function HomePage({ user, dashboard, refresh }) {
   const navigate = useNavigate();
-  const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered"].includes(p.status)).slice(0, 3);
+  const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered", "reschedule_pending"].includes(p.status)).slice(0, 3);
   const [localMatches, setLocalMatches] = useState(dashboard?.matches || []);
   const [sponsorRequests, setSponsorRequests] = useState([]);
   const [shareRequests, setShareRequests] = useState([]);
@@ -716,8 +716,8 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate, activeCh
   const playdates = dashboard?.playdates || [];
   const childSlots = activeChildId ? availability.filter((slot) => !slot.child_ids?.length || slot.child_ids.includes(activeChildId)) : availability;
   const availabilityDates = new Set(childSlots.map((slot) => slot.date));
-  const pendingDates = new Set(playdates.filter((p) => ["proposed", "countered"].includes(p.status)).map((p) => p.date));
-  const confirmedDates = new Set(playdates.filter((p) => ["confirmed", "rescheduled", "completed"].includes(p.status)).map((p) => p.date));
+  const pendingDates = new Set(playdates.filter((p) => ["proposed", "countered", "reschedule_pending"].includes(p.status)).map((p) => p.date));
+  const confirmedDates = new Set(playdates.filter((p) => ["confirmed", "rescheduled", "completed", "reschedule_pending"].includes(p.status)).map((p) => p.date));
 
   const monthDays = useMemo(() => {
     const start = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
