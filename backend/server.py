@@ -1388,8 +1388,20 @@ async def common_community_parent_ids(parent_id: str) -> List[str]:
     return list({m["parent_id"] for m in peer_members if m["parent_id"] != parent_id})
 
 
+async def shared_availability_parent_ids(parent_id: str) -> List[str]:
+    shares = await db.availability_share_requests.find({
+        "status": "approved",
+        "$or": [{"requester_parent_id": parent_id}, {"target_parent_id": parent_id}],
+    }, {"_id": 0}).to_list(200)
+    return list({s["target_parent_id"] if s["requester_parent_id"] == parent_id else s["requester_parent_id"] for s in shares})
+
+
+async def visible_peer_ids(parent_id: str) -> List[str]:
+    return list(set(await common_community_parent_ids(parent_id)) | set(await shared_availability_parent_ids(parent_id)))
+
+
 async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
-    peers = await common_community_parent_ids(parent_id)
+    peers = await visible_peer_ids(parent_id)
     start = date.today().isoformat()
     end = (date.today() + timedelta(days=21)).isoformat()
     rows = []
@@ -1450,7 +1462,7 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     own_slots = await db.availability_slots.find({"parent_id": parent_id, "date": {"$gte": date.today().isoformat()}, "is_paused": False}, {"_id": 0}).to_list(500)
     if not own_slots:
         return []
-    peers = await common_community_parent_ids(parent_id)
+    peers = await visible_peer_ids(parent_id)
     matches = []
     own_by_date = merge_blocks_by_date(own_slots)
     for peer_id in peers:

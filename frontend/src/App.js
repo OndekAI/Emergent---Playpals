@@ -803,14 +803,21 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
   const childRows = activeChild ? feedData.rows.filter((r) => r.child_id === activeChild.child_id) : feedData.rows;
 
   if (!childRows.length) {
-    const gradeCommunity = activeChild && dashboard?.communities?.find((c) => c.master_community_id && c.name === activeChild.grade);
+    const gradeCommunity = activeChild && dashboard?.communities?.find((c) => c.master_community_id && c.name.endsWith(activeChild.grade));
     return (
       <div className="card empty-state stack" data-testid="who-free-empty-state">
         <h3 className="card-title">No one's sharing with {activeChild?.first_name || "your child"} yet</h3>
         <p className="muted">Families in {activeChild?.grade || "your child's grade"} choose who sees their open time. Ask a family to share, and their calendar shows up here.</p>
         <button
           className="button primary"
-          onClick={() => navigate("/community", gradeCommunity ? { state: { communityId: gradeCommunity.community_id } } : undefined)}
+          onClick={() => {
+            if (gradeCommunity) {
+              navigate("/community", { state: { communityId: gradeCommunity.community_id } });
+            } else {
+              toast.error("Join a grade community first from the Community tab");
+              navigate("/community");
+            }
+          }}
           data-testid="who-free-empty-find-button"
         >
           Find families in {activeChild?.grade || "your grade"}
