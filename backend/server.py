@@ -12,6 +12,7 @@ import uuid
 import secrets
 import re
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -266,6 +267,24 @@ def time_label(value: str) -> str:
 def date_label(value: str) -> str:
     dt = datetime.fromisoformat(value).date()
     return dt.strftime("%A, %B %-d") if os.name != "nt" else dt.strftime("%A, %B %#d")
+
+
+def app_timezone() -> ZoneInfo:
+    # Single global timezone, not per-community/per-family: every seeded community
+    # today (Mulgrave School, Kitsilano) is West Vancouver/Vancouver, so one zone is
+    # correct for now. Real per-community timezones (for schools outside this region)
+    # would need a data-model change — flagged, deliberately out of scope here.
+    return ZoneInfo(os.environ.get("APP_TIMEZONE", "America/Vancouver"))
+
+
+def playdate_datetime(date_value: str, time_value: str) -> datetime:
+    # date/start_time/end_time carry no explicit timezone when saved — they're
+    # whatever wall-clock time the family typed in, in APP_TIMEZONE (not UTC: the
+    # server runs in UTC, but "5:00 PM" here means 5pm Pacific, not 5pm UTC).
+    # Interpreted in that zone, then converted to a UTC-aware datetime so timer jobs
+    # can compare against datetime.now(timezone.utc) correctly.
+    naive = datetime.fromisoformat(f"{date_value}T{time_value}:00")
+    return naive.replace(tzinfo=app_timezone()).astimezone(timezone.utc)
 
 
 def tier_for_credits(credits: int) -> Dict[str, Any]:
@@ -648,6 +667,24 @@ async def notify_parent(parent_id: str, title: str, body: str, kind: str, refere
             title,
             f"<div style='font-family:Arial,sans-serif;color:#2D2A27'><h2>{title}</h2><p>{body}</p><p style='color:#8C6E6E'>Playdates, sorted.</p></div>",
         )
+
+
+async def release_held_slot(playdate_id: str) -> None:
+    # Shared by withdraw (Phase 1) and proposal expiry (Phase 2): releasing a slot
+    # that was never held is a no-op since update_many just matches zero documents.
+    await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
+
+
+async def apply_playdate_completion(playdate: Dict[str, Any]) -> None:
+    # Shared by the manual /complete endpoint and the Phase 2 auto-complete timer,
+    # so credit awarding and the completion notification only live in one place.
+    playdate_id = playdate["playdate_id"]
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "completed", "completed_at": now_iso()}})
+    participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
+    for participant in participants:
+        amount = 2 if participant["parent_id"] == playdate["organizer_id"] else 1
+        await add_credit(participant["parent_id"], amount, "completed_playdate", playdate_id)
+        await notify_parent(participant["parent_id"], "Hope it was a blast! 🎉", "Your PlayPals credits have been added.", "credits", playdate_id)
 
 
 async def ensure_global_seed() -> None:
@@ -1646,6 +1683,7 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         "reschedule_rounds": 0,
         "created_at": now_iso(),
         "dedupe_key": dedupe_key,
+        "reminder_sent": False,
     }
     try:
         await db.playdates.insert_one(playdate.copy())
@@ -1683,6 +1721,10 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
                 "date": counter["date"],
                 "start_time": counter["start_time"],
                 "end_time": counter["end_time"],
+                # Reset so a reschedule_pending -> confirmed transition (a new date on an
+                # already-reminded playdate) gets its own day-before reminder; a no-op for
+                # the first-time countered -> confirmed case since it's already False.
+                "reminder_sent": False,
             }})
             await notify_parent(counter["from_parent_id"], "Playdate confirmed!", f"{user['name']} accepted your suggested time. {playdate['activity']} is confirmed.", "playdate", playdate_id)
         else:
@@ -1707,7 +1749,7 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         if playdate.get("status") not in ("proposed", "countered"):
             raise HTTPException(status_code=400, detail="This proposal can no longer be withdrawn")
         await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "withdrawn"}})
-        await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
+        await release_held_slot(playdate_id)
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
             await notify_parent(other["parent_id"], "Proposal withdrawn", f"{user['name']} withdrew the {playdate['activity']} proposal.", "playdate", playdate_id)
@@ -1757,12 +1799,7 @@ async def complete_playdate(playdate_id: str, user: Dict[str, Any] = Depends(cur
     playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
     if not playdate:
         raise HTTPException(status_code=404, detail="Playdate not found")
-    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "completed", "completed_at": now_iso()}})
-    participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
-    for participant in participants:
-        amount = 2 if participant["parent_id"] == playdate["organizer_id"] else 1
-        await add_credit(participant["parent_id"], amount, "completed_playdate", playdate_id)
-        await notify_parent(participant["parent_id"], "Hope it was a blast! 🎉", "Your PlayPals credits have been added.", "credits", playdate_id)
+    await apply_playdate_completion(playdate)
     return {"ok": True}
 
 
@@ -1816,6 +1853,130 @@ async def share_contact(playdate_id: str, payload: ContactShareRequest, user: Di
     value = user.get("phone") if payload.method == "phone" else user.get("email")
     await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"$set": {"shared_contact": {"method": payload.method, "value": value, "shared_at": now_iso()}}})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: timer infrastructure.
+#
+# Runs as a Railway Cron Job calling POST /internal/run-timers on a schedule,
+# not an in-process scheduler (APScheduler etc.) — in-process timers don't
+# survive Railway restarts/redeploys and would silently drop pending work,
+# which is unacceptable for anything that awards credits or expires
+# proposals. Decision made in the Phase 2 build prompt, applied as given.
+# ---------------------------------------------------------------------------
+
+AUTO_COMPLETE_GRACE_HOURS = 2
+PROPOSAL_EXPIRY_HOURS = 48
+REMINDER_WINDOW_HOURS = 24
+REMINDER_WINDOW_TOLERANCE_HOURS = 1
+
+
+async def run_auto_complete_timer(now: datetime) -> int:
+    """2.2 (M12): confirmed playdates whose end time passed 2+ hours ago -> completed,
+    reusing apply_playdate_completion so credit awarding stays in one place."""
+    cutoff = now - timedelta(hours=AUTO_COMPLETE_GRACE_HOURS)
+    today = date.today().isoformat()
+    # date <= today (server/UTC calendar date) at the DB level first: a playdate
+    # dated after today can't possibly have an end time 2+ hours in the past yet.
+    # Safe as a pre-filter even though playdate_datetime is APP_TIMEZONE-aware below:
+    # APP_TIMEZONE (Pacific) is always behind UTC, so its calendar date is never
+    # ahead of the server's — this bound can't exclude a true candidate.
+    candidates = await db.playdates.find({"status": "confirmed", "date": {"$lte": today}}, {"_id": 0}).to_list(2000)
+    count = 0
+    for playdate in candidates:
+        if playdate_datetime(playdate["date"], playdate["end_time"]) <= cutoff:
+            await apply_playdate_completion(playdate)
+            count += 1
+    return count
+
+
+async def run_proposal_expiry_timer(now: datetime) -> int:
+    """2.3 (M9, M11): proposed/countered playdates expire once 48h have passed since
+    creation OR the slot's scheduled start time has passed, whichever comes first.
+    Deliberately excludes reschedule_pending — that's a negotiation on an
+    already-confirmed playdate with different stakes, out of scope for this phase."""
+    cutoff_48h = now - timedelta(hours=PROPOSAL_EXPIRY_HOURS)
+    today = date.today().isoformat()
+    # Broad pre-filter (server/UTC calendar date, same reasoning as run_auto_complete_timer
+    # above — never excludes a true candidate) to shrink the candidate set; the exact
+    # decision is recomputed precisely in Python below, so a boundary imprecision here
+    # just means a candidate is picked up on the next cron run instead of this one.
+    candidates = await db.playdates.find({
+        "status": {"$in": ["proposed", "countered"]},
+        "$or": [
+            {"created_at": {"$lte": cutoff_48h.isoformat()}},
+            {"date": {"$lte": today}},
+        ],
+    }, {"_id": 0}).to_list(2000)
+    count = 0
+    for playdate in candidates:
+        created_at = parse_expiry(playdate["created_at"])
+        slot_start = playdate_datetime(playdate["date"], playdate["start_time"])
+        if created_at > cutoff_48h and slot_start > now:
+            continue
+        playdate_id = playdate["playdate_id"]
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "expired"}})
+        await release_held_slot(playdate_id)
+        participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
+        for participant in participants:
+            await notify_parent(participant["parent_id"], "Proposal expired", f"The {playdate['activity']} proposal for {date_label(playdate['date'])} wasn't answered in time and has expired.", "playdate", playdate_id)
+        count += 1
+    return count
+
+
+async def run_reminder_timer(now: datetime) -> int:
+    """2.4 (M31): confirmed playdates ~24h out get a day-before reminder. reminder_sent
+    guards idempotency regardless of how often the cron actually fires, per the spec —
+    the 23-25h window is a belt-and-suspenders second guard against double-sending if
+    the cron somehow ran twice within the same day before the flag was set."""
+    window_start = now + timedelta(hours=REMINDER_WINDOW_HOURS - REMINDER_WINDOW_TOLERANCE_HOURS)
+    window_end = now + timedelta(hours=REMINDER_WINDOW_HOURS + REMINDER_WINDOW_TOLERANCE_HOURS)
+    # Generous date range pre-filter, +2 days of headroom past today's (server/UTC)
+    # date so the APP_TIMEZONE lag behind UTC can't push a real candidate out of
+    # range; the exact 23-25h window is checked precisely in Python below.
+    date_floor = date.today().isoformat()
+    date_ceiling = (date.today() + timedelta(days=2)).isoformat()
+    candidates = await db.playdates.find({
+        "status": "confirmed",
+        "date": {"$gte": date_floor, "$lte": date_ceiling},
+        "reminder_sent": {"$ne": True},
+    }, {"_id": 0}).to_list(2000)
+    count = 0
+    for playdate in candidates:
+        start_dt = playdate_datetime(playdate["date"], playdate["start_time"])
+        if not (window_start <= start_dt <= window_end):
+            continue
+        playdate_id = playdate["playdate_id"]
+        participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
+        for participant in participants:
+            await notify_parent(participant["parent_id"], "Playdate tomorrow!", f"Don't forget: {playdate['activity']} on {date_label(playdate['date'])} at {time_label(playdate['start_time'])}.", "playdate", playdate_id)
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"reminder_sent": True}})
+        count += 1
+    return count
+
+
+async def verify_timer_secret(request: Request) -> None:
+    # Machine-to-machine auth for Railway Cron, not a user session — deliberately
+    # separate from current_user/require_admin. compare_digest avoids a timing
+    # side-channel on the secret comparison.
+    expected = os.environ.get("INTERNAL_TIMER_SECRET", "")
+    provided = request.headers.get("X-Internal-Timer-Secret", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="INTERNAL_TIMER_SECRET not configured")
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@api_router.post("/internal/run-timers")
+async def run_timers(_: None = Depends(verify_timer_secret)):
+    # All three jobs run in one request (2.1) — simpler to schedule and monitor as a
+    # single Railway Cron Job than three separate entries.
+    now = datetime.now(timezone.utc)
+    completed = await run_auto_complete_timer(now)
+    expired = await run_proposal_expiry_timer(now)
+    reminders_sent = await run_reminder_timer(now)
+    return {"completed": completed, "expired": expired, "reminders_sent": reminders_sent}
+
 
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
