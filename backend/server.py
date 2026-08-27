@@ -465,21 +465,7 @@ async def children_for_parent(parent_id: str) -> List[Dict[str, Any]]:
 RECENT_PLAYDATE_STATUSES = ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered", "declined", "withdrawn", "reschedule_pending", "expired"]
 
 
-async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
-    since = (date.today() - timedelta(days=14)).isoformat()
-    rows_a = await db.playdate_participants.find({"parent_id": parent_a}, {"_id": 0, "playdate_id": 1}).to_list(500)
-    ids_a = [row["playdate_id"] for row in rows_a]
-    if not ids_a:
-        return False
-    rows_b = await db.playdate_participants.find({"parent_id": parent_b, "playdate_id": {"$in": ids_a}}, {"_id": 0, "playdate_id": 1}).to_list(500)
-    ids = [row["playdate_id"] for row in rows_b]
-    if not ids:
-        return False
-    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": RECENT_PLAYDATE_STATUSES}})
-    return count > 0
-
-
-# Batched equivalent of has_recent_playdate_between/dismissal_suppressed/negative_reaction_suppressed
+# Batched equivalent of the old has_recent_playdate_between/dismissal_suppressed/negative_reaction_suppressed
 # combined: those did 2-3 sequential DB round trips PER peer, which is what made find_matches take
 # ~9.5s for a handful of peers (each round trip is a network hop to the Mongo host). This computes
 # suppression for every peer at once via a handful of $in queries instead of looping per peer.
