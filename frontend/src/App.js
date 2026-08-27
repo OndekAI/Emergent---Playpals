@@ -800,7 +800,7 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
     );
   }
 
-  const childRows = activeChild ? feedData.rows.filter((r) => r.child_id === activeChild.child_id) : feedData.rows;
+  const childRows = feedData.rows;
 
   if (!childRows.length) {
     const gradeCommunity = activeChild && dashboard?.communities?.find((c) => c.master_community_id && c.name.endsWith(activeChild.grade));
