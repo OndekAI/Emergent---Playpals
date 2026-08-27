@@ -6,7 +6,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import uuid
 import secrets
 import re
@@ -294,6 +294,54 @@ async def public_parent(parent_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+# Batched equivalent of calling public_parent() once per id in a loop — each call does 2 sequential
+# DB round trips (users.find_one + credits.find), which is expensive when done per-peer in a loop.
+async def public_parents_map(parent_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    ids = list(set(parent_ids))
+    if not ids:
+        return {}
+    users = await db.users.find({"user_id": {"$in": ids}}, {"_id": 0}).to_list(len(ids))
+    credit_rows = await db.credits.find({"parent_id": {"$in": ids}}, {"_id": 0, "parent_id": 1, "amount": 1}).to_list(5000)
+    totals: Dict[str, int] = {}
+    for row in credit_rows:
+        totals[row["parent_id"]] = totals.get(row["parent_id"], 0) + row.get("amount", 0)
+    result = {}
+    for parent in users:
+        tier = tier_for_credits(totals.get(parent["user_id"], 0))
+        result[parent["user_id"]] = {
+            "user_id": parent["user_id"],
+            "name": parent.get("name", "Parent"),
+            "picture": parent.get("picture", ""),
+            "neighborhood": parent.get("neighborhood", ""),
+            "tier": {"name": tier["name"], "badge": tier["badge"]},
+        }
+    return result
+
+
+async def children_map_for_parents(parent_ids: List[str], exclude_allergies: bool = False) -> Dict[str, List[Dict[str, Any]]]:
+    ids = list(set(parent_ids))
+    if not ids:
+        return {}
+    projection = {"_id": 0, "allergies": 0} if exclude_allergies else {"_id": 0}
+    children = await db.children.find({"parent_id": {"$in": ids}, "claimed": {"$ne": False}}, projection).to_list(20 * len(ids))
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for child in children:
+        result.setdefault(child["parent_id"], []).append(child)
+    return result
+
+
+async def slots_map_for_parents(parent_ids: List[str], extra_filter: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    ids = list(set(parent_ids))
+    if not ids:
+        return {}
+    query = {"parent_id": {"$in": ids}, "is_paused": False, **extra_filter}
+    slots = await db.availability_slots.find(query, {"_id": 0}).sort("date", 1).to_list(200 * len(ids))
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for slot in slots:
+        result.setdefault(slot["parent_id"], []).append(slot)
+    return result
+
+
 def grade_class_year(grade: str) -> int:
     current = date.today()
     school_year_end = current.year if current.month <= 6 else current.year + 1
@@ -414,6 +462,9 @@ async def children_for_parent(parent_id: str) -> List[Dict[str, Any]]:
     return await db.children.find({"parent_id": parent_id, "claimed": {"$ne": False}}, {"_id": 0}).to_list(20)
 
 
+RECENT_PLAYDATE_STATUSES = ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered", "declined", "withdrawn", "reschedule_pending", "expired"]
+
+
 async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
     since = (date.today() - timedelta(days=14)).isoformat()
     rows_a = await db.playdate_participants.find({"parent_id": parent_a}, {"_id": 0, "playdate_id": 1}).to_list(500)
@@ -424,45 +475,73 @@ async def has_recent_playdate_between(parent_a: str, parent_b: str) -> bool:
     ids = [row["playdate_id"] for row in rows_b]
     if not ids:
         return False
-    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": ["proposed", "confirmed", "completed", "cancelled", "rescheduled", "countered", "declined", "withdrawn", "reschedule_pending", "expired"]}})
+    count = await db.playdates.count_documents({"playdate_id": {"$in": ids}, "date": {"$gte": since}, "status": {"$in": RECENT_PLAYDATE_STATUSES}})
     return count > 0
 
 
-async def dismissal_suppressed(dismisser: str, target: str) -> bool:
-    dismissals = await db.match_dismissals.find({"dismisser_parent_id": dismisser, "target_parent_id": target}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    if len(dismissals) >= 3:
-        return True
-    for dismissal in dismissals:
-        if dismissal.get("dismissal_type") == "dont_suggest_again":
-            return True
-        if dismissal.get("dismissal_type") == "not_this_week":
-            created = parse_expiry(dismissal["created_at"])
-            if created > datetime.now(timezone.utc) - timedelta(days=7):
-                return True
-    return False
+# Batched equivalent of has_recent_playdate_between/dismissal_suppressed/negative_reaction_suppressed
+# combined: those did 2-3 sequential DB round trips PER peer, which is what made find_matches take
+# ~9.5s for a handful of peers (each round trip is a network hop to the Mongo host). This computes
+# suppression for every peer at once via a handful of $in queries instead of looping per peer.
+async def suppressed_peer_ids(parent_id: str, peer_ids: List[str]) -> Set[str]:
+    if not peer_ids:
+        return set()
+    since = (date.today() - timedelta(days=14)).isoformat()
+    suppressed: Set[str] = set()
 
+    own_rows = await db.playdate_participants.find({"parent_id": parent_id}, {"_id": 0, "playdate_id": 1}).to_list(2000)
+    own_playdate_ids = [row["playdate_id"] for row in own_rows]
 
-async def negative_reaction_suppressed(parent_a: str, parent_b: str) -> bool:
-    rows_a = await db.playdate_participants.find({"parent_id": parent_a}, {"_id": 0, "playdate_id": 1}).to_list(500)
-    ids_a = [row["playdate_id"] for row in rows_a]
-    if not ids_a:
-        return False
-    rows_b = await db.playdate_participants.find({"parent_id": parent_b, "playdate_id": {"$in": ids_a}}, {"_id": 0, "playdate_id": 1}).to_list(500)
-    ids = [row["playdate_id"] for row in rows_b]
-    if not ids:
-        return False
-    count = await db.emoji_reactions.count_documents({"playdate_id": {"$in": ids}, "parent_id": {"$in": [parent_a, parent_b]}, "reaction": "not_right"})
-    return count >= 2
+    if own_playdate_ids:
+        peer_rows = await db.playdate_participants.find(
+            {"parent_id": {"$in": peer_ids}, "playdate_id": {"$in": own_playdate_ids}}, {"_id": 0}
+        ).to_list(5000)
+        playdate_to_peers: Dict[str, Set[str]] = {}
+        for row in peer_rows:
+            playdate_to_peers.setdefault(row["playdate_id"], set()).add(row["parent_id"])
+        shared_ids = list(playdate_to_peers.keys())
 
+        if shared_ids:
+            recent = await db.playdates.find(
+                {"playdate_id": {"$in": shared_ids}, "date": {"$gte": since}, "status": {"$in": RECENT_PLAYDATE_STATUSES}},
+                {"_id": 0, "playdate_id": 1},
+            ).to_list(5000)
+            for row in recent:
+                suppressed |= playdate_to_peers.get(row["playdate_id"], set())
 
-async def match_pair_suppressed(parent_id: str, peer_id: str) -> bool:
-    if await has_recent_playdate_between(parent_id, peer_id):
-        return True
-    if await dismissal_suppressed(parent_id, peer_id):
-        return True
-    if await negative_reaction_suppressed(parent_id, peer_id):
-        return True
-    return False
+            reactions = await db.emoji_reactions.find(
+                {"playdate_id": {"$in": shared_ids}, "parent_id": {"$in": [parent_id, *peer_ids]}, "reaction": "not_right"},
+                {"_id": 0, "playdate_id": 1},
+            ).to_list(5000)
+            reaction_counts: Dict[str, int] = {}
+            for row in reactions:
+                for peer in playdate_to_peers.get(row["playdate_id"], set()):
+                    reaction_counts[peer] = reaction_counts.get(peer, 0) + 1
+            suppressed |= {peer for peer, count in reaction_counts.items() if count >= 2}
+
+    remaining = [peer for peer in peer_ids if peer not in suppressed]
+    if remaining:
+        dismissals = await db.match_dismissals.find(
+            {"dismisser_parent_id": parent_id, "target_parent_id": {"$in": remaining}}, {"_id": 0}
+        ).sort("created_at", -1).to_list(5000)
+        by_target: Dict[str, List[Dict[str, Any]]] = {}
+        for dismissal in dismissals:
+            by_target.setdefault(dismissal["target_parent_id"], []).append(dismissal)
+        for target, records in by_target.items():
+            if len(records) >= 3:
+                suppressed.add(target)
+                continue
+            for dismissal in records:
+                if dismissal.get("dismissal_type") == "dont_suggest_again":
+                    suppressed.add(target)
+                    break
+                if dismissal.get("dismissal_type") == "not_this_week":
+                    created = parse_expiry(dismissal["created_at"])
+                    if created > datetime.now(timezone.utc) - timedelta(days=7):
+                        suppressed.add(target)
+                        break
+
+    return suppressed
 
 
 async def families_are_sharing(parent_a: str, parent_b: str) -> bool:
@@ -1402,15 +1481,20 @@ async def visible_peer_ids(parent_id: str) -> List[str]:
 
 async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
     peers = await visible_peer_ids(parent_id)
+    if not peers:
+        return []
     start = date.today().isoformat()
     end = (date.today() + timedelta(days=21)).isoformat()
+    parents_map = await public_parents_map(peers)
+    children_map = await children_map_for_parents(peers, exclude_allergies=True)
+    slots_map = await slots_map_for_parents(peers, {"date": {"$gte": start, "$lte": end}})
     rows = []
     for peer_id in peers:
-        parent = await public_parent(peer_id)
+        parent = parents_map.get(peer_id)
         if not parent:
             continue
-        children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
-        raw_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$gte": start, "$lte": end}, "is_paused": False}, {"_id": 0}).sort("date", 1).to_list(30)
+        children = children_map.get(peer_id, [])
+        raw_slots = slots_map.get(peer_id, [])
         slots = await visible_slots_for_viewer(raw_slots, parent_id, peer_id)
         family_rows = []
         for slot in slots:
@@ -1463,12 +1547,24 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
     if not own_slots:
         return []
     peers = await visible_peer_ids(parent_id)
-    matches = []
+    if not peers:
+        return []
     own_by_date = merge_blocks_by_date(own_slots)
-    for peer_id in peers:
-        if await match_pair_suppressed(parent_id, peer_id):
+    suppressed = await suppressed_peer_ids(parent_id, peers)
+    active_peers = [peer_id for peer_id in peers if peer_id not in suppressed]
+    if not active_peers:
+        return []
+    slots_map = await slots_map_for_parents(active_peers, {"date": {"$in": list(own_by_date.keys())}})
+    parents_map = await public_parents_map(active_peers)
+    children_map = await children_map_for_parents(active_peers, exclude_allergies=True)
+    own_children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(10)
+    matches = []
+    for peer_id in active_peers:
+        parent = parents_map.get(peer_id)
+        if not parent:
             continue
-        raw_peer_slots = await db.availability_slots.find({"parent_id": peer_id, "date": {"$in": list(own_by_date.keys())}, "is_paused": False}, {"_id": 0}).to_list(100)
+        peer_children = children_map.get(peer_id, [])
+        raw_peer_slots = slots_map.get(peer_id, [])
         visible_peer_slots = await visible_slots_for_viewer(raw_peer_slots, parent_id, peer_id)
         peer_by_date = merge_blocks_by_date(visible_peer_slots)
         for slot_date, peer_blocks in peer_by_date.items():
@@ -1477,9 +1573,6 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
                     start = max(minutes(own_block["start"]), minutes(peer_block["start"]))
                     end = min(minutes(own_block["end"]), minutes(peer_block["end"]))
                     if end - start >= 90:
-                        parent = await public_parent(peer_id)
-                        peer_children = await db.children.find({"parent_id": peer_id, "claimed": {"$ne": False}}, {"_id": 0, "allergies": 0}).to_list(10)
-                        own_children = await db.children.find({"parent_id": parent_id}, {"_id": 0}).to_list(10)
                         interest_overlap = len(set((peer_children[0].get("interests", []) if peer_children else [])) & set((own_children[0].get("interests", []) if own_children else [])))
                         score = min(96, 55 + min(25, int((end - start - 90) / 3)) + interest_overlap * 6)
                         matches.append({
@@ -1515,11 +1608,22 @@ async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
     if not all_ids:
         return []
     playdates = await db.playdates.find({"playdate_id": {"$in": all_ids}}, {"_id": 0}).sort("date", 1).to_list(500)
+    all_participants = await db.playdate_participants.find({"playdate_id": {"$in": all_ids}}, {"_id": 0}).to_list(2000)
+    participants_by_playdate: Dict[str, List[Dict[str, Any]]] = {}
+    for participant in all_participants:
+        participants_by_playdate.setdefault(participant["playdate_id"], []).append(participant)
+    parent_ids = list({p["parent_id"] for p in all_participants})
+    parents_map = await public_parents_map(parent_ids)
+    all_child_ids = list({child_id for p in all_participants for child_id in p.get("child_ids", [])})
+    children_by_id: Dict[str, Dict[str, Any]] = {}
+    if all_child_ids:
+        children = await db.children.find({"child_id": {"$in": all_child_ids}, "claimed": {"$ne": False}}, {"_id": 0}).to_list(len(all_child_ids))
+        children_by_id = {child["child_id"]: child for child in children}
     for playdate in playdates:
-        participants = await db.playdate_participants.find({"playdate_id": playdate["playdate_id"]}, {"_id": 0}).to_list(20)
+        participants = participants_by_playdate.get(playdate["playdate_id"], [])
         for participant in participants:
-            participant["parent"] = await public_parent(participant["parent_id"])
-            participant["children"] = await db.children.find({"child_id": {"$in": participant.get("child_ids", [])}, "claimed": {"$ne": False}}, {"_id": 0}).to_list(10)
+            participant["parent"] = parents_map.get(participant["parent_id"])
+            participant["children"] = [children_by_id[cid] for cid in participant.get("child_ids", []) if cid in children_by_id]
         playdate["participants"] = participants
     return playdates
 
