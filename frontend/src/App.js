@@ -984,11 +984,13 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const [location, setLocation] = useState("Neighborhood park");
   const [activity, setActivity] = useState(ACTIVITIES[0]);
   const [sending, setSending] = useState(false);
+  const [blockIdx, setBlockIdx] = useState(0);
   const selected = match
     ? { parentId: match.parent.user_id, parentName: match.parent.name, childName: match.children?.[0]?.first_name, childId: match.children?.[0]?.child_id, date: match.date, blocks: [{ start: match.start_time, end: match.end_time }] }
     : row
     ? { parentId: row.family_id, parentName: row.parent_name, childName: row.child_name, childId: row.child_id, date: row.date, blocks: row.slot_time, slotId: row.slot_id }
     : null;
+  const chosenBlock = selected?.blocks?.[blockIdx] || selected?.blocks?.[0];
   const ownChild = dashboard?.children?.find((c) => c.child_id === (row?.child_id)) || dashboard?.children?.[0];
   const today = isoDate(new Date());
   const hasOwnOpenSlot = (dashboard?.availability || []).some((s) => !s.is_paused && s.date >= today && (!s.child_ids?.length || s.child_ids.includes(ownChild?.child_id)));
@@ -1003,8 +1005,8 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
           invitee_parent_id: selected.parentId,
           child_ids: ownChild ? [ownChild.child_id] : [],
           date: selected.date,
-          start_time: selected.blocks[0].start,
-          end_time: selected.blocks[selected.blocks.length - 1].end,
+          start_time: chosenBlock.start,
+          end_time: chosenBlock.end,
           location,
           activity,
           notes: "",
@@ -1029,8 +1031,22 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
         <div className="mini-card stack" data-testid="proposal-readout">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">When</span>
-            <strong data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}, {selected.blocks?.map((b) => `${timeLabel(b.start)}–${timeLabel(b.end)}`).join(", ")}</strong>
+            <strong data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}, {chosenBlock ? `${timeLabel(chosenBlock.start)}–${timeLabel(chosenBlock.end)}` : ""}</strong>
           </div>
+          {selected.blocks?.length > 1 && (
+            <div className="chip-row" data-testid="proposal-block-picker">
+              {selected.blocks.map((b, i) => (
+                <button
+                  key={i}
+                  className={`chip ${i === blockIdx ? "active" : ""}`}
+                  onClick={() => setBlockIdx(i)}
+                  data-testid={`proposal-block-${i}`}
+                >
+                  {timeLabel(b.start)}–{timeLabel(b.end)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">Children</span>
             <strong data-testid="proposal-children">{ownChild?.first_name || "Your child"} + {selected.childName || selected.parentName}</strong>
