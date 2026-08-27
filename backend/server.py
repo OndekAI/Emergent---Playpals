@@ -1869,10 +1869,13 @@ async def startup_seed():
     # Enforces the /playdates dedupe_key idempotency guard at the database level;
     # partial so a resolved proposal (declined/withdrawn/confirmed) doesn't block
     # a legitimate later resubmission with the same organizer/invitee/date/time.
+    # Also requires dedupe_key to exist: pre-existing "proposed" playdates from
+    # before this field was added don't have it, and would otherwise all collide
+    # on dedupe_key: null and fail the index build (this crashed the service).
     await db.playdates.create_index(
         "dedupe_key",
         unique=True,
-        partialFilterExpression={"status": "proposed"},
+        partialFilterExpression={"status": "proposed", "dedupe_key": {"$exists": True}},
     )
 
 @app.on_event("shutdown")
