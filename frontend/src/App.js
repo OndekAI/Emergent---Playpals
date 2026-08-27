@@ -1247,7 +1247,7 @@ function CommunityDrillDown({ communityId, proposalMatch, dashboard, refresh, on
             </button>
           )}
         </section>
-        {detail?.grades && (
+        {detail?.grades && !community.master_community_id && (
           <section className="stack">
             <h2 className="section-label">GRADE COMMUNITIES</h2>
             {detail.grades.map((grade) => (
