@@ -991,6 +991,22 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
     ? { parentId: row.family_id, parentName: row.parent_name, childName: row.child_name, childId: row.child_id, date: row.date, blocks: row.slot_time, slotId: row.slot_id }
     : null;
   const chosenBlock = selected?.blocks?.[blockIdx] || selected?.blocks?.[0];
+  const [customStart, setCustomStart] = useState(chosenBlock?.start);
+  const [customEnd, setCustomEnd] = useState(chosenBlock?.end);
+  useEffect(() => {
+    if (chosenBlock) { setCustomStart(chosenBlock.start); setCustomEnd(chosenBlock.end); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockIdx, selected?.date, selected?.parentId]);
+  const blockTimeOptions = chosenBlock
+    ? timeOptions.filter((t) => minutes(t) >= minutes(chosenBlock.start) && minutes(t) <= minutes(chosenBlock.end))
+    : [];
+  useEffect(() => {
+    if (customStart && customEnd && minutes(customEnd) <= minutes(customStart)) {
+      const next = blockTimeOptions.find((t) => minutes(t) > minutes(customStart));
+      if (next) setCustomEnd(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customStart]);
   const ownChild = dashboard?.children?.find((c) => c.child_id === (row?.child_id)) || dashboard?.children?.[0];
   const today = isoDate(new Date());
   const hasOwnOpenSlot = (dashboard?.availability || []).some((s) => !s.is_paused && s.date >= today && (!s.child_ids?.length || s.child_ids.includes(ownChild?.child_id)));
@@ -1005,8 +1021,8 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
           invitee_parent_id: selected.parentId,
           child_ids: ownChild ? [ownChild.child_id] : [],
           date: selected.date,
-          start_time: chosenBlock.start,
-          end_time: chosenBlock.end,
+          start_time: customStart,
+          end_time: customEnd,
           location,
           activity,
           notes: "",
@@ -1030,8 +1046,8 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
         <div className="sheet-title-row"><h3 data-testid="proposal-title">Propose to {selected.parentName}</h3><button className="icon-button" onClick={onClose} data-testid="proposal-close-button"><X size={20} /></button></div>
         <div className="mini-card stack" data-testid="proposal-readout">
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <span className="muted">When</span>
-            <strong data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}, {chosenBlock ? `${timeLabel(chosenBlock.start)}–${timeLabel(chosenBlock.end)}` : ""}</strong>
+            <span className="muted">Date</span>
+            <strong data-testid="proposal-time">{fmtDate(selected.date, { weekday: "long", month: "short", day: "numeric" })}</strong>
           </div>
           {selected.blocks?.length > 1 && (
             <div className="chip-row" data-testid="proposal-block-picker">
@@ -1047,6 +1063,18 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
               ))}
             </div>
           )}
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <span className="muted">Time</span>
+            <div className="row" style={{ gap: 8 }}>
+              <select className="select" value={customStart} onChange={(e) => setCustomStart(e.target.value)} data-testid="proposal-start-select">
+                {blockTimeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}
+              </select>
+              <span className="muted">–</span>
+              <select className="select" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} data-testid="proposal-end-select">
+                {blockTimeOptions.filter((t) => minutes(t) > minutes(customStart)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}
+              </select>
+            </div>
+          </div>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="muted">Children</span>
             <strong data-testid="proposal-children">{ownChild?.first_name || "Your child"} + {selected.childName || selected.parentName}</strong>
