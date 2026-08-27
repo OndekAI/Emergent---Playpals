@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, Depends, HTTPException, Request, Respons
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 import os
 import logging
 from pathlib import Path
@@ -1621,13 +1622,11 @@ async def list_playdates(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.post("/playdates")
 async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depends(current_user)):
-    # Idempotency guard (1.2): a resubmit of the same proposal within a short window
-    # returns the already-created playdate instead of creating a duplicate.
-    if payload.slot_id:
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-        recent = await db.playdates.find_one({"organizer_id": user["user_id"], "slot_id": payload.slot_id, "created_at": {"$gte": cutoff}}, {"_id": 0})
-        if recent:
-            return {"playdate": recent}
+    # Idempotency guard: a duplicate submit of the same proposal (e.g. a fast
+    # double-click firing two concurrent requests) hits a unique index on
+    # dedupe_key instead of racing a check-then-insert, so it's atomic at the
+    # database level rather than just a best-effort pre-check.
+    dedupe_key = f"{user['user_id']}:{payload.invitee_parent_id}:{payload.date}:{payload.start_time}:{payload.end_time}"
     playdate_id = new_id("playdate")
     title = payload.title or "1:1 Playdate"
     playdate = {
@@ -1646,8 +1645,15 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         "cancellation_reason": None,
         "reschedule_rounds": 0,
         "created_at": now_iso(),
+        "dedupe_key": dedupe_key,
     }
-    await db.playdates.insert_one(playdate.copy())
+    try:
+        await db.playdates.insert_one(playdate.copy())
+    except DuplicateKeyError:
+        existing = await db.playdates.find_one({"dedupe_key": dedupe_key, "status": "proposed"}, {"_id": 0})
+        if existing:
+            return {"playdate": existing}
+        raise
     if payload.slot_id:
         slot = await db.availability_slots.find_one({"slot_id": payload.slot_id}, {"_id": 0})
         if slot and slot["parent_id"] == payload.invitee_parent_id:
@@ -1860,7 +1866,14 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_seed():
-    pass  # Demo seed data disabled for production testing
+    # Enforces the /playdates dedupe_key idempotency guard at the database level;
+    # partial so a resolved proposal (declined/withdrawn/confirmed) doesn't block
+    # a legitimate later resubmission with the same organizer/invitee/date/time.
+    await db.playdates.create_index(
+        "dedupe_key",
+        unique=True,
+        partialFilterExpression={"status": "proposed"},
+    )
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

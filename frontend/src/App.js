@@ -984,6 +984,7 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const [location, setLocation] = useState("Neighborhood park");
   const [activity, setActivity] = useState(ACTIVITIES[0]);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const [blockIdx, setBlockIdx] = useState(0);
   const selected = match
     ? { parentId: match.parent.user_id, parentName: match.parent.name, childName: match.children?.[0]?.first_name, childId: match.children?.[0]?.child_id, date: match.date, blocks: [{ start: match.start_time, end: match.end_time }] }
@@ -1012,7 +1013,11 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
   const hasOwnOpenSlot = (dashboard?.availability || []).some((s) => !s.is_paused && s.date >= today && (!s.child_ids?.length || s.child_ids.includes(ownChild?.child_id)));
 
   const submit = async () => {
-    if (sending) return;
+    // sendingRef is checked/set synchronously so two click events fired before
+    // React re-renders (e.g. a fast double-click) can't both slip past this guard
+    // the way the `sending` state alone could.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
     setSending(true);
     try {
       await api("/playdates", {
@@ -1035,6 +1040,7 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
       onClose();
     } catch (error) {
       toast.error(error.message);
+      sendingRef.current = false;
       setSending(false);
     }
   };
