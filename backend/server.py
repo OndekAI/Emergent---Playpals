@@ -1817,18 +1817,27 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         if overlap:
             warning = f"Heads up — you already have a playdate around this time on {date_label(final_date)} for another child."
     elif payload.action == "decline":
-        # NOTE (logged, not fixed this phase): when status is reschedule_pending, this
-        # terminally declines the whole playdate rather than reverting to the prior
-        # confirmed time. Revisit once reschedule_pending has its own decline semantics.
-        await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
-        # counter cleared alongside the terminal status (C5): a stale counter object left
-        # on a resolved playdate reads as still-negotiating to anything that inspects the
-        # record later, including the Phase 2 timer jobs.
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "declined", "counter": None}})
-        await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
-        others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
-        for other in others:
-            await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
+        if playdate.get("status") == "reschedule_pending":
+            # Declining a reschedule REQUEST reverts to the original confirmed date/time
+            # rather than terminating the playdate — reschedule_playdate never overwrites
+            # date/start_time/end_time (only the separate counter object holds the
+            # proposed new time), so the original is already intact here to revert to.
+            # Nothing about the underlying confirmed booking actually changed, so
+            # participant rsvp_status and the held slot are left untouched.
+            await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed", "counter": None}})
+            others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+            for other in others:
+                await notify_parent(other["parent_id"], "Reschedule declined", f"{user['name']} wants to keep the original time — {playdate['activity']} on {date_label(playdate['date'])} is still confirmed.", "playdate", playdate_id)
+        else:
+            await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
+            # counter cleared alongside the terminal status (C5): a stale counter object left
+            # on a resolved playdate reads as still-negotiating to anything that inspects the
+            # record later, including the Phase 2 timer jobs.
+            await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "declined", "counter": None}})
+            await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
+            others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
+            for other in others:
+                await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
     elif payload.action == "withdraw":
         if user["user_id"] != playdate["organizer_id"]:
             raise HTTPException(status_code=403, detail="Only the sender can withdraw a proposal")
