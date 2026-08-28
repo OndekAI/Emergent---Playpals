@@ -1738,7 +1738,10 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         # terminally declines the whole playdate rather than reverting to the prior
         # confirmed time. Revisit once reschedule_pending has its own decline semantics.
         await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "declined", "responded_at": now_iso()}})
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "declined"}})
+        # counter cleared alongside the terminal status (C5): a stale counter object left
+        # on a resolved playdate reads as still-negotiating to anything that inspects the
+        # record later, including the Phase 2 timer jobs.
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "declined", "counter": None}})
         await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
@@ -1748,7 +1751,8 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
             raise HTTPException(status_code=403, detail="Only the sender can withdraw a proposal")
         if playdate.get("status") not in ("proposed", "countered"):
             raise HTTPException(status_code=400, detail="This proposal can no longer be withdrawn")
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "withdrawn"}})
+        # counter cleared alongside the terminal status (C5) — see decline branch above.
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "withdrawn", "counter": None}})
         await release_held_slot(playdate_id)
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
@@ -1786,7 +1790,9 @@ async def cancel_playdate(playdate_id: str, payload: CancelRequest, user: Dict[s
     playdate = await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})
     if not playdate:
         raise HTTPException(status_code=404, detail="Playdate not found")
-    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled", "cancellation_reason": payload.reason, "cancelled_by": user["user_id"], "cancelled_at": now_iso()}})
+    # counter cleared alongside the terminal status (C5) — see respond_playdate's decline
+    # branch; cancel has no status guard so this can also fire from countered/reschedule_pending.
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "cancelled", "cancellation_reason": payload.reason, "cancelled_by": user["user_id"], "cancelled_at": now_iso(), "counter": None}})
     await db.availability_slots.update_many({"proposal_id": playdate_id}, {"$set": {"status": "open", "proposal_id": None}})
     participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
     for participant in participants:
@@ -1915,7 +1921,9 @@ async def run_proposal_expiry_timer(now: datetime) -> int:
         if created_at > cutoff_48h and slot_start > now:
             continue
         playdate_id = playdate["playdate_id"]
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "expired"}})
+        # counter cleared alongside the terminal status (C5, applies here too: a countered
+        # proposal that times out unanswered is exactly the case this timer exists for).
+        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "expired", "counter": None}})
         await release_held_slot(playdate_id)
         participants = await db.playdate_participants.find({"playdate_id": playdate_id}, {"_id": 0}).to_list(20)
         for participant in participants:
