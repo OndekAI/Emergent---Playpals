@@ -326,6 +326,7 @@ function OnboardingCard({ dashboard, navigate }) {
 
 function HomePage({ user, dashboard, refresh }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered", "reschedule_pending"].includes(p.status)).slice(0, 3);
   const [localMatches, setLocalMatches] = useState(dashboard?.matches || []);
   const [sponsorRequests, setSponsorRequests] = useState([]);
@@ -337,6 +338,18 @@ function HomePage({ user, dashboard, refresh }) {
   }, [dashboard]);
 
   useEffect(() => setLocalMatches(dashboard?.matches || []), [dashboard?.matches]);
+
+  // 3.7: scroll to the playdate a notification linked to, if it's currently rendered
+  // here (e.g. in the top-3 Upcoming list). If it's not — completed, or bumped out of
+  // the top 3 — this is a graceful no-op rather than a broken/blank screen, since
+  // PlaydateCard's existing render logic (and this page's own filtering) are otherwise
+  // untouched; not building a new "find this playdate anywhere" view for this pass.
+  useEffect(() => {
+    const targetId = location.state?.highlightPlaydateId;
+    if (!targetId) return;
+    const el = document.querySelector(`[data-testid="playdate-card-${targetId}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [location.state]);
 
   const proposeMatch = (match) => {
     navigate("/community", { state: { match } });
@@ -491,8 +504,13 @@ const mostRecentSlot = (availability) => {
   return sorted[0] || null;
 };
 
-function DaySheet({ selectedDate, availability, onClose, onSaved, children, activeChildId }) {
+function DaySheet({ selectedDate, availability, onClose, onSaved, children, activeChildId, playdates }) {
   const dateSlots = availability.filter((slot) => slot.date === isoDate(selectedDate));
+  // 3.1: a live proposal (not yet resolved) blocks deletion outright on the backend —
+  // distinct from ever_held, which is just "someone proposed against this at some point"
+  // and only prompts a confirm-before-delete, not a hard block.
+  const slotIds = new Set(dateSlots.map((s) => s.slot_id));
+  const hasLiveProposal = (playdates || []).some((p) => ["proposed", "countered"].includes(p.status) && slotIds.has(p.slot_id));
   const existing = dateSlots[0] || null;
   const lastUsed = existing || mostRecentSlot(availability);
   const [checkedIds, setCheckedIds] = useState(() => new Set(
@@ -511,6 +529,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
   const [members, setMembers] = useState([]);
   const [membersLoading, setMembersLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [blockedDelete, setBlockedDelete] = useState(false);
   const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
   const isPast = isoDate(selectedDate) < isoDate(new Date());
@@ -584,7 +603,9 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
   };
 
   const remove = () => {
-    if (dateSlots.some((s) => s.ever_held)) {
+    if (hasLiveProposal) {
+      setBlockedDelete(true);
+    } else if (dateSlots.some((s) => s.ever_held)) {
       setConfirmDelete(true);
     } else {
       doRemove();
@@ -705,6 +726,18 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
           </section>
         </div>
       )}
+      {blockedDelete && (
+        <div className="center-overlay" data-testid="availability-remove-blocked-overlay">
+          <section className="modal-panel stack" data-testid="availability-remove-blocked-modal">
+            <div className="sheet-title-row">
+              <h3>There's an active proposal on this time</h3>
+              <button className="icon-button" onClick={() => setBlockedDelete(false)} data-testid="availability-remove-blocked-close"><X size={20} /></button>
+            </div>
+            <p className="muted">A family has an open proposal on this time right now. Respond to it (accept, decline, or withdraw) before removing this time.</p>
+            <button className="button secondary" onClick={() => setBlockedDelete(false)} data-testid="availability-remove-blocked-ok">Got it</button>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -776,7 +809,7 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate, activeCh
       </div>
       <p className="muted" style={{ fontSize: 12 }}>Tap any date to set open time. Recurring slots pause on their own after four quiet weeks.</p>
       {onPastPlaydates && <button className="text-link" onClick={onPastPlaydates} data-testid="past-playdates-link">Past playdates ›</button>}
-      {selectedDate && <DaySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} activeChildId={activeChildId} />}
+      {selectedDate && <DaySheet selectedDate={selectedDate} availability={availability} onClose={() => onSelectDate(null)} onSaved={refresh} children={dashboard.children} activeChildId={activeChildId} playdates={playdates} />}
     </section>
   );
 }
@@ -976,8 +1009,28 @@ function PlaydatesPage({ user, dashboard, refresh }) {
 }
 
 function ActivityCard({ note }) {
+  const navigate = useNavigate();
   const Icon = note.kind === "playdate" ? Check : note.kind === "sponsor" ? Clock : Send;
-  return <div className="activity-card" data-testid={`activity-card-${note.notification_id}`}><span className={`activity-icon ${note.kind || "default"}`}><Icon size={16} /></span><div><strong>{note.title}</strong><p>{note.body}</p><small>{fmtDate(note.created_at?.slice(0, 10) || isoDate(new Date()), { month: "short", day: "numeric" })}</small></div>{!note.read_at && <i />}</div>;
+  // 3.7: kinds "playdate"/"credits"/"chat" all carry reference_id = the playdate_id they're
+  // about (see notify_parent call sites in server.py). "sponsor" notifications don't
+  // reference a playdate, so they stay non-navigable rather than routing to nothing.
+  const linksToPlaydate = !!note.reference_id && ["playdate", "credits", "chat"].includes(note.kind);
+  const handleClick = () => {
+    if (!linksToPlaydate) return;
+    navigate("/home", { state: { highlightPlaydateId: note.reference_id } });
+  };
+  return (
+    <div
+      className="activity-card"
+      onClick={linksToPlaydate ? handleClick : undefined}
+      style={linksToPlaydate ? { cursor: "pointer" } : undefined}
+      data-testid={`activity-card-${note.notification_id}`}
+    >
+      <span className={`activity-icon ${note.kind || "default"}`}><Icon size={16} /></span>
+      <div><strong>{note.title}</strong><p>{note.body}</p><small>{fmtDate(note.created_at?.slice(0, 10) || isoDate(new Date()), { month: "short", day: "numeric" })}</small></div>
+      {!note.read_at && <i />}
+    </div>
+  );
 }
 
 function ProposalModal({ row, match, dashboard, onClose, refresh }) {
@@ -1020,7 +1073,7 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
     sendingRef.current = true;
     setSending(true);
     try {
-      await api("/playdates", {
+      const response = await api("/playdates", {
         method: "POST",
         body: JSON.stringify({
           invitee_parent_id: selected.parentId,
@@ -1036,6 +1089,9 @@ function ProposalModal({ row, match, dashboard, onClose, refresh }) {
         }),
       });
       toast.success("Proposal sent");
+      // 3.5: cross-child overlap is a warning, not a blocker — proposal already went
+      // through, this just flags it in addition to the success toast.
+      if (response?.warning) toast(response.warning);
       await refresh();
       onClose();
     } catch (error) {
@@ -1581,8 +1637,10 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
   const respond = async (action) => {
     try {
-      await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
+      const response = await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
       toast.success(action === "accept" ? "Playdate confirmed" : "Response sent");
+      // 3.5: cross-child overlap warning on accept — non-blocking, alongside the success toast.
+      if (response?.warning) toast(response.warning);
       await refresh();
     } catch (error) { toast.error(error.message); }
   };

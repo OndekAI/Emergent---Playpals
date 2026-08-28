@@ -687,6 +687,51 @@ async def apply_playdate_completion(playdate: Dict[str, Any]) -> None:
         await notify_parent(participant["parent_id"], "Hope it was a blast! 🎉", "Your PlayPals credits have been added.", "credits", playdate_id)
 
 
+async def apply_counter_proposal(playdate_id: str, playdate: Dict[str, Any], from_parent_id: str, date_value: str, start_time: str, end_time: str, new_status: str) -> None:
+    # Shared by reschedule_playdate and respond_playdate's "counter" action (3.6) — both
+    # are a "suggest another time" negotiation round, capped at 3 total (M13). Previously
+    # only reschedule_playdate enforced this, so the decline flow's counter-propose could
+    # loop indefinitely.
+    if playdate.get("reschedule_rounds", 0) >= 3:
+        raise HTTPException(status_code=400, detail="This one seems tricky — want to cancel and try a fresh date?")
+    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
+        "status": new_status,
+        "counter": {"date": date_value, "start_time": start_time, "end_time": end_time, "from_parent_id": from_parent_id, "created_at": now_iso()},
+    }, "$inc": {"reschedule_rounds": 1}})
+
+
+async def find_overlapping_other_child_playdate(parent_id: str, child_ids: List[str], date_value: str, start_time: str, end_time: str, exclude_playdate_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    # 3.5: best-effort cross-child double-booking check — does parent_id already have a
+    # confirmed/pending playdate for a clearly DIFFERENT child overlapping this time?
+    # Warn-only per the Phase 3 prompt, not a hard block. Skips ambiguous cases where
+    # either side's child_ids is empty rather than risk false-positive warnings on data
+    # that can't actually be distinguished by child — notably, an invitee's participant
+    # record never records which child is attending (payload.child_ids is only captured
+    # for the organizer at creation; the invitee side is always []), a pre-existing gap
+    # in the data model, out of scope for this phase. This means the check is reliably
+    # useful for the organizer/proposing side but mostly a no-op for the invitee side
+    # until that gap is addressed separately.
+    own_child_ids = set(child_ids or [])
+    if not own_child_ids:
+        return None
+    rows = await db.playdate_participants.find({"parent_id": parent_id}, {"_id": 0}).to_list(500)
+    other_ids = []
+    for row in rows:
+        if row["playdate_id"] == exclude_playdate_id:
+            continue
+        row_children = set(row.get("child_ids") or [])
+        if not row_children or row_children & own_child_ids:
+            continue  # ambiguous (empty) or same child — not a cross-child conflict
+        other_ids.append(row["playdate_id"])
+    if not other_ids:
+        return None
+    candidates = await db.playdates.find({"playdate_id": {"$in": other_ids}, "status": {"$in": ["proposed", "countered", "confirmed", "reschedule_pending"]}}, {"_id": 0}).to_list(500)
+    for candidate in candidates:
+        if candidate["date"] == date_value and minutes(candidate["start_time"]) < minutes(end_time) and minutes(start_time) < minutes(candidate["end_time"]):
+            return candidate
+    return None
+
+
 async def ensure_global_seed() -> None:
     communities = [
         {"community_id": "comm_mulgrave", "name": "Mulgrave School", "type": "school", "city": "West Vancouver", "master_community_id": None},
@@ -1016,6 +1061,15 @@ async def list_availability(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.delete("/availability/{date_value}")
 async def remove_availability(date_value: str, user: Dict[str, Any] = Depends(current_user)):
+    # 3.1: block deletion outright rather than silently skip/partial-delete if any slot
+    # for this date has a live proposal against it — checked against playdates directly
+    # (not the slot's own possibly-stale status field) so this can't be fooled by drift.
+    slots = await db.availability_slots.find({"parent_id": user["user_id"], "date": date_value}, {"_id": 0}).to_list(50)
+    slot_ids = [slot["slot_id"] for slot in slots]
+    if slot_ids:
+        live_hold = await db.playdates.find_one({"slot_id": {"$in": slot_ids}, "status": {"$in": ["proposed", "countered"]}}, {"_id": 0})
+        if live_hold:
+            raise HTTPException(status_code=409, detail="A family has an active proposal on this time right now. Respond to it before removing this time.")
     await db.availability_slots.delete_many({"parent_id": user["user_id"], "date": date_value})
     return {"ok": True}
 
@@ -1659,6 +1713,21 @@ async def list_playdates(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.post("/playdates")
 async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depends(current_user)):
+    # 3.4: if a slot_id was given, it must still exist and belong to the invitee — the
+    # feed the client rendered from could be stale (slot deleted between render and
+    # submit). Reject cleanly instead of silently creating an orphaned playdate.
+    # 3.2: first-accept-wins — if the slot already has a live proposed/countered
+    # playdate against it, reject the second attempt instead of creating a competing
+    # one. Checked against playdates directly, not the slot's own status field, so a
+    # stale/racy slot.status can't let a second proposal slip through.
+    slot = None
+    if payload.slot_id:
+        slot = await db.availability_slots.find_one({"slot_id": payload.slot_id}, {"_id": 0})
+        if not slot or slot["parent_id"] != payload.invitee_parent_id:
+            raise HTTPException(status_code=400, detail="This time is no longer available. Please pick another time.")
+        live_hold = await db.playdates.find_one({"slot_id": payload.slot_id, "status": {"$in": ["proposed", "countered"]}}, {"_id": 0})
+        if live_hold:
+            raise HTTPException(status_code=409, detail="This time was just booked by another family.")
     # Idempotency guard: a duplicate submit of the same proposal (e.g. a fast
     # double-click firing two concurrent requests) hits a unique index on
     # dedupe_key instead of racing a check-then-insert, so it's atomic at the
@@ -1692,15 +1761,16 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         if existing:
             return {"playdate": existing}
         raise
-    if payload.slot_id:
-        slot = await db.availability_slots.find_one({"slot_id": payload.slot_id}, {"_id": 0})
-        if slot and slot["parent_id"] == payload.invitee_parent_id:
-            await db.availability_slots.update_one({"slot_id": payload.slot_id}, {"$set": {"status": "held", "proposal_id": playdate_id, "ever_held": True}})
+    if slot:
+        await db.availability_slots.update_one({"slot_id": payload.slot_id}, {"$set": {"status": "held", "proposal_id": playdate_id, "ever_held": True}})
     await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": payload.invitee_parent_id, "dismissal_type": "dont_suggest_again"})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": payload.invitee_parent_id, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
     await notify_parent(payload.invitee_parent_id, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
-    return {"playdate": playdate}
+    # 3.5: cross-child double-booking — warn, don't block (see find_overlapping_other_child_playdate).
+    overlap = await find_overlapping_other_child_playdate(user["user_id"], payload.child_ids, payload.date, payload.start_time, payload.end_time, exclude_playdate_id=playdate_id)
+    warning = f"Heads up — you already have a playdate around this time on {date_label(payload.date)} for another child." if overlap else None
+    return {"playdate": playdate, "warning": warning}
 
 
 @api_router.post("/playdates/{playdate_id}/respond")
@@ -1711,9 +1781,15 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
     participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
     if not participant:
         raise HTTPException(status_code=403, detail="Not a participant")
+    warning = None
     if payload.action == "accept":
+        # 3.3: re-check status hasn't moved to a terminal state since the client last saw
+        # it (e.g. the other side withdrew/it expired in the meantime) before applying.
+        if playdate.get("status") in ("cancelled", "withdrawn", "declined", "expired"):
+            raise HTTPException(status_code=409, detail="This proposal is no longer available.")
         if playdate.get("status") in ("countered", "reschedule_pending") and playdate.get("counter"):
             counter = playdate["counter"]
+            final_date, final_start, final_end = counter["date"], counter["start_time"], counter["end_time"]
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": counter["from_parent_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
@@ -1728,11 +1804,18 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
             }})
             await notify_parent(counter["from_parent_id"], "Playdate confirmed!", f"{user['name']} accepted your suggested time. {playdate['activity']} is confirmed.", "playdate", playdate_id)
         else:
+            final_date, final_start, final_end = playdate["date"], playdate["start_time"], playdate["end_time"]
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
             if accepted >= 2:
                 await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
                 await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
+        # 3.5: cross-child double-booking — warn, don't block (see
+        # find_overlapping_other_child_playdate; only meaningful when this participant's
+        # own child_ids is populated, which for the invitee side today it never is).
+        overlap = await find_overlapping_other_child_playdate(user["user_id"], participant.get("child_ids") or [], final_date, final_start, final_end, exclude_playdate_id=playdate_id)
+        if overlap:
+            warning = f"Heads up — you already have a playdate around this time on {date_label(final_date)} for another child."
     elif payload.action == "decline":
         # NOTE (logged, not fixed this phase): when status is reschedule_pending, this
         # terminally declines the whole playdate rather than reverting to the prior
@@ -1758,11 +1841,14 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         for other in others:
             await notify_parent(other["parent_id"], "Proposal withdrawn", f"{user['name']} withdrew the {playdate['activity']} proposal.", "playdate", playdate_id)
     elif payload.action == "counter":
-        await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "countered", "counter": {"date": payload.counter_date, "start_time": payload.counter_start_time, "end_time": payload.counter_end_time, "from_parent_id": user["user_id"], "created_at": now_iso()}}})
+        # 3.6: same round cap as reschedule_playdate, via the shared helper — this path
+        # (the decline flow's "suggest another time") previously never checked or
+        # incremented reschedule_rounds at all, so it could loop indefinitely.
+        await apply_counter_proposal(playdate_id, playdate, user["user_id"], payload.counter_date, payload.counter_start_time, payload.counter_end_time, "countered")
         others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
         for other in others:
             await notify_parent(other["parent_id"], "Counter-proposal received", f"{user['name']} suggested another time.", "playdate", playdate_id)
-    return {"playdate": await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0})}
+    return {"playdate": await db.playdates.find_one({"playdate_id": playdate_id}, {"_id": 0}), "warning": warning}
 
 
 @api_router.post("/playdates/{playdate_id}/reschedule")
@@ -1773,12 +1859,8 @@ async def reschedule_playdate(playdate_id: str, payload: RescheduleRequest, user
     participant = await db.playdate_participants.find_one({"playdate_id": playdate_id, "parent_id": user["user_id"]}, {"_id": 0})
     if not participant:
         raise HTTPException(status_code=403, detail="Not a participant")
-    if playdate.get("reschedule_rounds", 0) >= 3:
-        raise HTTPException(status_code=400, detail="This one seems tricky — want to cancel and try a fresh date?")
-    await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
-        "status": "reschedule_pending",
-        "counter": {"date": payload.date, "start_time": payload.start_time, "end_time": payload.end_time, "from_parent_id": user["user_id"], "created_at": now_iso()},
-    }, "$inc": {"reschedule_rounds": 1}})
+    # 3.6: shared with respond_playdate's "counter" action — same round cap, same shape.
+    await apply_counter_proposal(playdate_id, playdate, user["user_id"], payload.date, payload.start_time, payload.end_time, "reschedule_pending")
     others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
     for other in others:
         await notify_parent(other["parent_id"], "Reschedule request", f"{user['name']} suggested a new time for {playdate['activity']}.", "playdate", playdate_id)
