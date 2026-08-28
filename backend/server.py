@@ -701,16 +701,15 @@ async def apply_counter_proposal(playdate_id: str, playdate: Dict[str, Any], fro
 
 
 async def find_overlapping_other_child_playdate(parent_id: str, child_ids: List[str], date_value: str, start_time: str, end_time: str, exclude_playdate_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    # 3.5: best-effort cross-child double-booking check — does parent_id already have a
+    # 3.5: cross-child double-booking check — does parent_id already have a
     # confirmed/pending playdate for a clearly DIFFERENT child overlapping this time?
-    # Warn-only per the Phase 3 prompt, not a hard block. Skips ambiguous cases where
-    # either side's child_ids is empty rather than risk false-positive warnings on data
-    # that can't actually be distinguished by child — notably, an invitee's participant
-    # record never records which child is attending (payload.child_ids is only captured
-    # for the organizer at creation; the invitee side is always []), a pre-existing gap
-    # in the data model, out of scope for this phase. This means the check is reliably
-    # useful for the organizer/proposing side but mostly a no-op for the invitee side
-    # until that gap is addressed separately.
+    # Warn-only, not a hard block: one parent can't personally be at two different
+    # kids' playdates at once, but a co-parent/helper might genuinely cover it, so this
+    # flags rather than prevents. Skips ambiguous cases where either side's child_ids is
+    # empty (a genuinely unscoped "all kids" slot, or a match-based proposal with no
+    # slot at all) rather than risk false-positive warnings on data that can't actually
+    # be distinguished by child. Reliable on both organizer and invitee sides now that
+    # create_playdate captures the invitee's child_ids from the slot at creation.
     own_child_ids = set(child_ids or [])
     if not own_child_ids:
         return None
@@ -722,6 +721,35 @@ async def find_overlapping_other_child_playdate(parent_id: str, child_ids: List[
         row_children = set(row.get("child_ids") or [])
         if not row_children or row_children & own_child_ids:
             continue  # ambiguous (empty) or same child — not a cross-child conflict
+        other_ids.append(row["playdate_id"])
+    if not other_ids:
+        return None
+    candidates = await db.playdates.find({"playdate_id": {"$in": other_ids}, "status": {"$in": ["proposed", "countered", "confirmed", "reschedule_pending"]}}, {"_id": 0}).to_list(500)
+    for candidate in candidates:
+        if candidate["date"] == date_value and minutes(candidate["start_time"]) < minutes(end_time) and minutes(start_time) < minutes(candidate["end_time"]):
+            return candidate
+    return None
+
+
+async def find_overlapping_same_child_playdate(parent_id: str, child_ids: List[str], date_value: str, start_time: str, end_time: str, exclude_playdate_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    # Same-child hard-block companion to find_overlapping_other_child_playdate above:
+    # does parent_id already have a confirmed/pending playdate for the SAME child
+    # overlapping this time? Unlike the cross-child case, there's no ambiguity to warn
+    # about instead of blocking — a single child physically cannot attend two playdates
+    # at once, regardless of how many adults are available to supervise. Structurally
+    # this mirrors the cross-child check exactly, just with the shared/disjoint
+    # condition inverted (row_children & own_child_ids required, not excluded).
+    own_child_ids = set(child_ids or [])
+    if not own_child_ids:
+        return None
+    rows = await db.playdate_participants.find({"parent_id": parent_id}, {"_id": 0}).to_list(500)
+    other_ids = []
+    for row in rows:
+        if row["playdate_id"] == exclude_playdate_id:
+            continue
+        row_children = set(row.get("child_ids") or [])
+        if not (row_children & own_child_ids):
+            continue  # no shared child — not a same-child conflict
         other_ids.append(row["playdate_id"])
     if not other_ids:
         return None
@@ -1765,7 +1793,16 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
         await db.availability_slots.update_one({"slot_id": payload.slot_id}, {"$set": {"status": "held", "proposal_id": playdate_id, "ever_held": True}})
     await db.match_dismissals.delete_many({"dismisser_parent_id": user["user_id"], "target_parent_id": payload.invitee_parent_id, "dismissal_type": "dont_suggest_again"})
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": user["user_id"], "child_ids": payload.child_ids, "rsvp_status": "accepted", "responded_at": now_iso(), "shared_contact": None})
-    await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": payload.invitee_parent_id, "child_ids": [], "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
+    # The invitee's own child_ids weren't ever captured here — always [] regardless of
+    # which child the slot was actually for, making anything that needs "which of the
+    # invitee's children is this for" (e.g. find_overlapping_other_child_playdate) a
+    # no-op on this side. Availability is per-child by construction (save_availability
+    # creates one slot doc per child_id, or [] only for a genuinely unscoped "all kids"
+    # slot), so the slot already carries the right answer — just copy it over. Falls
+    # back to [] for match-based proposals (no slot_id) or unscoped slots, which is
+    # correct in both cases, not a bug: no per-child data exists to capture there.
+    invitee_child_ids = slot.get("child_ids") or [] if slot else []
+    await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": payload.invitee_parent_id, "child_ids": invitee_child_ids, "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
     await notify_parent(payload.invitee_parent_id, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
     # 3.5: cross-child double-booking — warn, don't block (see find_overlapping_other_child_playdate).
     overlap = await find_overlapping_other_child_playdate(user["user_id"], payload.child_ids, payload.date, payload.start_time, payload.end_time, exclude_playdate_id=playdate_id)
@@ -1787,9 +1824,21 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
         # it (e.g. the other side withdrew/it expired in the meantime) before applying.
         if playdate.get("status") in ("cancelled", "withdrawn", "declined", "expired"):
             raise HTTPException(status_code=409, detail="This proposal is no longer available.")
-        if playdate.get("status") in ("countered", "reschedule_pending") and playdate.get("counter"):
+        has_counter = playdate.get("status") in ("countered", "reschedule_pending") and playdate.get("counter")
+        if has_counter:
             counter = playdate["counter"]
             final_date, final_start, final_end = counter["date"], counter["start_time"], counter["end_time"]
+        else:
+            final_date, final_start, final_end = playdate["date"], playdate["start_time"], playdate["end_time"]
+        # Same-child hard block: a single child physically cannot attend two overlapping
+        # playdates, so — unlike the cross-child warning below, which stays warn-only
+        # because a co-parent/helper might cover two different kids at once — this
+        # rejects the accept outright, before any mutation, rather than letting it
+        # through with just a warning.
+        same_child_conflict = await find_overlapping_same_child_playdate(user["user_id"], participant.get("child_ids") or [], final_date, final_start, final_end, exclude_playdate_id=playdate_id)
+        if same_child_conflict:
+            raise HTTPException(status_code=409, detail="This child already has a playdate at an overlapping time.")
+        if has_counter:
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             await db.playdate_participants.update_one({"playdate_id": playdate_id, "parent_id": counter["from_parent_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {
@@ -1804,15 +1853,14 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
             }})
             await notify_parent(counter["from_parent_id"], "Playdate confirmed!", f"{user['name']} accepted your suggested time. {playdate['activity']} is confirmed.", "playdate", playdate_id)
         else:
-            final_date, final_start, final_end = playdate["date"], playdate["start_time"], playdate["end_time"]
             await db.playdate_participants.update_one({"participant_id": participant["participant_id"]}, {"$set": {"rsvp_status": "accepted", "responded_at": now_iso()}})
             accepted = await db.playdate_participants.count_documents({"playdate_id": playdate_id, "rsvp_status": "accepted"})
             if accepted >= 2:
                 await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
                 await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
         # 3.5: cross-child double-booking — warn, don't block (see
-        # find_overlapping_other_child_playdate; only meaningful when this participant's
-        # own child_ids is populated, which for the invitee side today it never is).
+        # find_overlapping_other_child_playdate). Reliable on both sides now that
+        # create_playdate captures the invitee's child_ids from the slot at creation.
         overlap = await find_overlapping_other_child_playdate(user["user_id"], participant.get("child_ids") or [], final_date, final_start, final_end, exclude_playdate_id=playdate_id)
         if overlap:
             warning = f"Heads up — you already have a playdate around this time on {date_label(final_date)} for another child."
