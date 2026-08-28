@@ -530,6 +530,7 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
   const [membersLoading, setMembersLoading] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [blockedDelete, setBlockedDelete] = useState(false);
+  const [showShareSuggestion, setShowShareSuggestion] = useState(false);
   const dateText = selectedDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
   const dayName = selectedDate.toLocaleDateString(undefined, { weekday: "long" });
   const isPast = isoDate(selectedDate) < isoDate(new Date());
@@ -570,6 +571,12 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
     const childIds = children.length <= 1
       ? (children[0] ? [children[0].child_id] : [])
       : (checkedIds.size === children.length ? [] : [...checkedIds]);
+    // 4.5: first-save-only, not every save — this is a one-time "here's what to do
+    // next" nudge for someone who just set availability for the first time and would
+    // otherwise see nothing happen (no active share means nobody can see it yet).
+    // Repeating it on every save would just be naggy for a parent who already knows
+    // the ropes. Checked against the pre-save prop, before this save adds to it.
+    const isFirstSave = availability.length === 0;
     try {
       await api("/availability", {
         method: "POST",
@@ -585,7 +592,11 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
       });
       toast.success("Saved");
       await onSaved();
-      onClose();
+      if (isFirstSave) {
+        setShowShareSuggestion(true);
+      } else {
+        onClose();
+      }
     } catch (error) {
       toast.error(error.message);
     }
@@ -738,6 +749,62 @@ function DaySheet({ selectedDate, availability, onClose, onSaved, children, acti
           </section>
         </div>
       )}
+      {showShareSuggestion && (
+        <ShareSuggestionModal
+          members={members}
+          onClose={() => { setShowShareSuggestion(false); onClose(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ShareSuggestionModal({ members, onClose }) {
+  // 4.5: shown once, right after a parent's first-ever availability save — this is
+  // the direct fix for saving availability otherwise appearing to do nothing, since
+  // nobody can see it without an active share. Suggests community members not yet
+  // shared with, reusing the same request-to-share call as ParentProfileSheet/
+  // FeedShareButton rather than a new mechanism.
+  const suggestions = (members || []).filter((m) => m.share_status === "none");
+  const [sentIds, setSentIds] = useState(() => new Set());
+
+  const request = async (parentId) => {
+    try {
+      const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parentId }) });
+      setSentIds((prev) => new Set(prev).add(parentId));
+      toast.success(result.status === "approved" ? "You're now sharing availability 🎉" : "Request sent");
+    } catch (error) { toast.error(error.message); }
+  };
+
+  return (
+    <div className="center-overlay" data-testid="share-suggestion-overlay">
+      <section className="modal-panel stack" data-testid="share-suggestion-modal">
+        <div className="sheet-title-row">
+          <h3>Availability saved — now let families see it</h3>
+          <button className="icon-button" onClick={onClose} data-testid="share-suggestion-close"><X size={20} /></button>
+        </div>
+        {suggestions.length ? (
+          <>
+            <p className="muted">Nobody can see your open time until you share it. Request sharing with families from your communities:</p>
+            <div className="stack" style={{ gap: 8 }} data-testid="share-suggestion-list">
+              {suggestions.slice(0, 8).map((member) => (
+                <div className="mini-card child-profile-card" key={member.user_id} data-testid={`share-suggestion-row-${member.user_id}`}>
+                  <div className="row" style={{ gap: 10 }}>
+                    <div className="avatar-circle" style={{ width: 36, height: 36 }}>{member.picture ? <img src={member.picture} alt="" /> : member.name?.[0]}</div>
+                    <strong>{member.name}</strong>
+                  </div>
+                  {sentIds.has(member.user_id)
+                    ? <span className="badge amber">Request sent</span>
+                    : <button className="button small secondary" onClick={() => request(member.user_id)} data-testid={`share-suggestion-request-${member.user_id}`}>Request to share</button>}
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="muted">Join a community from the Community tab to find families to share with.</p>
+        )}
+        <button className="button primary" onClick={onClose} data-testid="share-suggestion-done">Done</button>
+      </section>
     </div>
   );
 }
@@ -814,6 +881,24 @@ function CalendarView({ dashboard, refresh, selectedDate, onSelectDate, activeCh
   );
 }
 
+function FeedShareButton({ parentId, initialStatus }) {
+  // 4.4: same request-to-share entry point as ParentProfileSheet (Community member
+  // list), surfaced here too so a parent can request sharing without leaving the
+  // feed they're already browsing.
+  const [status, setStatus] = useState(initialStatus || "none");
+  const request = async () => {
+    try {
+      const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parentId }) });
+      setStatus(result.status === "approved" ? "approved" : "pending_sent");
+      toast.success(result.status === "approved" ? "You're now sharing availability 🎉" : "Request sent");
+    } catch (error) { toast.error(error.message); }
+  };
+  if (status === "approved") return <span className="badge sage" data-testid={`feed-share-status-${parentId}`}>✓ Sharing</span>;
+  if (status === "pending_sent") return <span className="badge amber" data-testid={`feed-share-status-${parentId}`}>Request sent</span>;
+  if (status === "pending_received") return <span className="badge blue" data-testid={`feed-share-status-${parentId}`}>Respond from Home</span>;
+  return <button className="button small secondary" onClick={request} data-testid={`feed-share-request-${parentId}`}>Request to share</button>;
+}
+
 function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
   const navigate = useNavigate();
   const [feedData, setFeedData] = useState(null);
@@ -878,7 +963,7 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
   const byFamilyId = new Map();
   for (const row of filtered) {
     if (!byFamilyId.has(row.family_id)) {
-      const entry = { family_id: row.family_id, parent_name: row.parent_name, parent_picture: row.parent_picture, child_name: row.child_name, grade: row.grade, rows: [] };
+      const entry = { family_id: row.family_id, parent_name: row.parent_name, parent_picture: row.parent_picture, child_name: row.child_name, grade: row.grade, share_status: row.share_status, rows: [] };
       byFamilyId.set(row.family_id, entry);
       families.push(entry);
     }
@@ -910,6 +995,7 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
                       <p className="muted">{family.parent_name}</p>
                     </div>
                   </div>
+                  <FeedShareButton parentId={family.family_id} initialStatus={family.share_status} />
                 </div>
                 <div className="stack" style={{ gap: 8 }}>
                   {visibleRows.map((row) => row.status === "held" ? (
@@ -1906,6 +1992,56 @@ function CancelModal({ playdate, refresh, onClose }) {
   );
 }
 
+function SharingSection() {
+  // 4.1: placed in Profile as its own section, matching the existing
+  // card-stack-per-topic IA already used for Children/Notification settings on
+  // this same page, rather than inventing a new screen or nav entry for it.
+  const [shares, setShares] = useState(null);
+  const [revoking, setRevoking] = useState(null);
+
+  const load = useCallback(() => {
+    api("/availability-share-requests/active").then(setShares).catch(() => setShares([]));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const revoke = async (requestId) => {
+    setRevoking(requestId);
+    try {
+      await api(`/availability-share-requests/${requestId}/revoke`, { method: "POST" });
+      // 4.2: silent by design — no toast wording implying the other party was told;
+      // this only confirms the action to the person who took it.
+      toast.success("Stopped sharing");
+      setShares((prev) => prev.filter((s) => s.request_id !== requestId));
+    } catch (error) {
+      toast.error(error.message);
+    } finally {
+      setRevoking(null);
+    }
+  };
+
+  if (shares === null) return null;
+
+  return (
+    <section className="stack" data-testid="sharing-section">
+      <h2 className="section-title" data-testid="sharing-title">Sharing with {shares.length} {shares.length === 1 ? "family" : "families"}</h2>
+      {shares.map((share) => (
+        <div className="mini-card child-profile-card" key={share.request_id} data-testid={`sharing-card-${share.request_id}`}>
+          <div className="row" style={{ gap: 10 }}>
+            <div className="avatar-circle" style={{ width: 40, height: 40 }}>
+              {share.parent.picture ? <img src={share.parent.picture} alt="" /> : share.parent.name?.[0]}
+            </div>
+            <strong data-testid={`sharing-name-${share.request_id}`}>{share.parent.name}</strong>
+          </div>
+          <button className="button small secondary" onClick={() => revoke(share.request_id)} disabled={revoking === share.request_id} data-testid={`sharing-revoke-${share.request_id}`}>
+            {revoking === share.request_id ? "…" : "Stop sharing"}
+          </button>
+        </div>
+      ))}
+      {!shares.length && <div className="empty-state card" data-testid="sharing-empty-state">Not sharing availability with anyone yet.</div>}
+    </section>
+  );
+}
+
 function ProfilePage({ user, dashboard, refresh }) {
   const [showChild, setShowChild] = useState(false);
   const [editingChild, setEditingChild] = useState(null);
@@ -1945,6 +2081,7 @@ function ProfilePage({ user, dashboard, refresh }) {
           ))}
           {!dashboard?.children?.length && <div className="empty-state card" data-testid="children-empty-state">Add a child profile to unlock scheduling.</div>}
         </section>
+        <SharingSection />
         <section className="card stack" data-testid="notification-settings-card"><h2 className="card-title" data-testid="notification-settings-title">Notification settings</h2><div className="chip-row"><span className="badge sage">Email {user?.notification_preferences?.email ? "on" : "off"}</span><span className="badge blue">Push {user?.notification_preferences?.push ? "on" : "off"}</span><span className="badge amber">SMS {user?.notification_preferences?.sms ? "on" : "off"}</span></div></section>
         {user?.is_admin && <AdminPendingCommunities />}
         {user?.is_admin && <AdminApprovedCommunities />}

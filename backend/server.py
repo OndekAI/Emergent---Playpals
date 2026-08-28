@@ -1491,6 +1491,16 @@ async def step_back_community(community_id: str, payload: StepBackRequest, user:
     return {"status": status, "message": f"You've stepped back from {community['name']}. Your history and credits are safe. 💛"}
 
 
+async def approve_availability_share(share: Dict[str, Any], approver_name: str) -> None:
+    # Shared by respond_availability_share's approve action and request_availability_share's
+    # crossing-request auto-resolve (4.3) — both are "this share is now active", just
+    # reached via a different path (the target explicitly approving vs. the target
+    # happening to have already sent the same request the other way).
+    await add_credit(share["target_parent_id"], 1, "availability_share", share["requester_parent_id"])
+    await add_credit(share["requester_parent_id"], 1, "availability_share", share["target_parent_id"])
+    await notify_parent(share["requester_parent_id"], "Availability sharing approved", f"You're now sharing availability with {approver_name} 🎉", "availability_share", share["request_id"])
+
+
 @api_router.post("/availability-share-requests")
 async def request_availability_share(payload: AvailabilityShareRequestCreate, user: Dict[str, Any] = Depends(current_user)):
     if payload.target_parent_id == user["user_id"]:
@@ -1498,6 +1508,22 @@ async def request_availability_share(payload: AvailabilityShareRequestCreate, us
     existing = await db.availability_share_requests.find_one({"requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "status": {"$in": ["pending", "approved"]}}, {"_id": 0})
     if existing:
         return existing
+    # 4.3: crossing-request auto-resolve — if the target already sent a pending
+    # request THE OTHER WAY (the reciprocal case: both families tried to share with
+    # each other around the same time), approve that existing row instead of also
+    # inserting a new one, so this resolves to one active relationship, not two
+    # pending rows sitting next to each other.
+    # NOTE (logged, not fixed this phase): this is a check-then-insert, not atomic —
+    # two genuinely simultaneous crossing requests (both check before either inserts)
+    # could still race into two pending rows, the same class of bug the dedupe_key
+    # fix addressed for playdates. 4.3 asks for a dedup-check fix for the realistic
+    # sequential case (someone requests shortly after the other side already did),
+    # not a race-proof guarantee; out of scope here, revisit if it proves to matter.
+    reciprocal = await db.availability_share_requests.find_one({"requester_parent_id": payload.target_parent_id, "target_parent_id": user["user_id"], "status": "pending"}, {"_id": 0})
+    if reciprocal:
+        await db.availability_share_requests.update_one({"request_id": reciprocal["request_id"]}, {"$set": {"status": "approved", "responded_at": now_iso()}})
+        await approve_availability_share(reciprocal, user["name"])
+        return await db.availability_share_requests.find_one({"request_id": reciprocal["request_id"]}, {"_id": 0})
     request_doc = {"request_id": new_id("share"), "requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "community_id": payload.community_id, "status": "pending", "created_at": now_iso(), "responded_at": None}
     await db.availability_share_requests.insert_one(request_doc.copy())
     await notify_parent(payload.target_parent_id, "Availability share request", f"{user['name']} wants to share availability with you", "availability_share", request_doc["request_id"])
@@ -1520,10 +1546,45 @@ async def respond_availability_share(request_id: str, payload: AvailabilityShare
     status = "approved" if payload.action == "approve" else "declined"
     await db.availability_share_requests.update_one({"request_id": request_id}, {"$set": {"status": status, "responded_at": now_iso()}})
     if status == "approved":
-        await add_credit(user["user_id"], 1, "availability_share", share["requester_parent_id"])
-        await add_credit(share["requester_parent_id"], 1, "availability_share", user["user_id"])
-        await notify_parent(share["requester_parent_id"], "Availability sharing approved", f"You're now sharing availability with {user['name']} 🎉", "availability_share", request_id)
+        await approve_availability_share(share, user["name"])
     return {"status": status}
+
+
+@api_router.get("/availability-share-requests/active")
+async def active_availability_shares(user: Dict[str, Any] = Depends(current_user)):
+    # 4.1: "sharing with N families" list — full share_request docs (not just peer
+    # ids, unlike shared_availability_parent_ids) so the UI has a request_id to
+    # revoke by.
+    shares = await db.availability_share_requests.find({
+        "status": "approved",
+        "$or": [{"requester_parent_id": user["user_id"]}, {"target_parent_id": user["user_id"]}],
+    }, {"_id": 0}).sort("responded_at", -1).to_list(200)
+    results = []
+    for share in shares:
+        other_id = share["target_parent_id"] if share["requester_parent_id"] == user["user_id"] else share["requester_parent_id"]
+        other = await public_parent(other_id)
+        if other:
+            results.append({"request_id": share["request_id"], "parent": other})
+    return results
+
+
+@api_router.post("/availability-share-requests/{request_id}/revoke")
+async def revoke_availability_share(request_id: str, user: Dict[str, Any] = Depends(current_user)):
+    share = await db.availability_share_requests.find_one({
+        "request_id": request_id,
+        "status": "approved",
+        "$or": [{"requester_parent_id": user["user_id"]}, {"target_parent_id": user["user_id"]}],
+    }, {"_id": 0})
+    if not share:
+        raise HTTPException(status_code=404, detail="Active share not found")
+    await db.availability_share_requests.update_one({"request_id": request_id}, {"$set": {"status": "revoked", "revoked_by": user["user_id"], "revoked_at": now_iso()}})
+    # 4.2: deliberately silent — no notify_parent call here. Per the design decision,
+    # revoking is a private action; telling the other party "so-and-so stopped
+    # sharing with you" manufactures social friction this small trusted community
+    # doesn't need. Their slots simply stop appearing in the revoker's feed going
+    # forward (families_are_sharing/visible_slots_for_viewer only match status
+    # "approved", so this takes effect immediately on the next feed read — see 4.6).
+    return {"status": "revoked"}
 
 
 @api_router.post("/matches/dismiss")
@@ -1603,6 +1664,10 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
         raw_slots = slots_map.get(peer_id, [])
         slots = await visible_slots_for_viewer(raw_slots, parent_id, peer_id)
         family_rows = []
+        # 4.4: computed once per peer, not per row — lets the feed offer "request to
+        # share" in place, same as the existing Community member list, without an
+        # extra round trip per card.
+        peer_share_status = await share_status_between(parent_id, peer_id) if slots else None
         for slot in slots:
             scoped_ids = slot.get("child_ids") or []
             target_children = [c for c in children if c["child_id"] in scoped_ids] if scoped_ids else children
@@ -1618,6 +1683,7 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
                     "date": slot["date"],
                     "slot_time": slot.get("blocks", []),
                     "status": slot.get("status", "open"),
+                    "share_status": peer_share_status,
                 })
         for row in family_rows:
             row["family_total_slots"] = len(family_rows)
@@ -1634,6 +1700,11 @@ async def community_feed(user: Dict[str, Any] = Depends(current_user)):
 async def community_members(user: Dict[str, Any] = Depends(current_user)):
     peer_ids = await common_community_parent_ids(user["user_id"])
     members = [m for m in [await public_parent(pid) for pid in peer_ids] if m]
+    # 4.5: this endpoint's only caller (DaySheet) needs share_status to power the
+    # post-first-save sharing prompt's "not yet shared with" suggestion list, same
+    # enrichment community_detail already does for its own member list.
+    for member in members:
+        member["share_status"] = await share_status_between(user["user_id"], member["user_id"])
     members.sort(key=lambda m: m["name"])
     return members
 
