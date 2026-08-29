@@ -324,10 +324,30 @@ function OnboardingCard({ dashboard, navigate }) {
   );
 }
 
+// 5.6: rough client-side estimate for "soonest to expire" sort order — mirrors the
+// backend timer's whichever-comes-first rule (created_at + 48h vs. the slot's own
+// start time, see run_proposal_expiry_timer in server.py) closely enough for display
+// ordering. Not meant to be exact-to-the-minute; the real expiry is server-side.
+function estimatedExpiry(playdate) {
+  const createdPlus48h = new Date(playdate.created_at).getTime() + 48 * 3600 * 1000;
+  const slotStart = new Date(`${playdate.date}T${playdate.start_time}:00`).getTime();
+  return Math.min(createdPlus48h, slotStart);
+}
+
 function HomePage({ user, dashboard, refresh }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const upcoming = (dashboard?.playdates || []).filter((p) => ["proposed", "confirmed", "rescheduled", "countered", "reschedule_pending"].includes(p.status)).slice(0, 3);
+  // 5.6: split what was one undifferentiated "Upcoming" list into waiting-on-you
+  // (needs a response from this parent) vs. already-confirmed, sorted appropriately
+  // for each — soonest-to-expire for the former, soonest-date for the latter.
+  const waitingOnYou = (dashboard?.playdates || [])
+    .filter((p) => ["proposed", "countered", "reschedule_pending"].includes(p.status))
+    .sort((a, b) => estimatedExpiry(a) - estimatedExpiry(b));
+  const comingUp = (dashboard?.playdates || [])
+    .filter((p) => ["confirmed", "rescheduled"].includes(p.status))
+    .sort((a, b) => new Date(`${a.date}T${a.start_time}:00`) - new Date(`${b.date}T${b.start_time}:00`));
+  const [showAllComingUp, setShowAllComingUp] = useState(false);
+  const visibleComingUp = showAllComingUp ? comingUp : comingUp.slice(0, 2);
   const [localMatches, setLocalMatches] = useState(dashboard?.matches || []);
   const [sponsorRequests, setSponsorRequests] = useState([]);
   const [shareRequests, setShareRequests] = useState([]);
@@ -339,16 +359,26 @@ function HomePage({ user, dashboard, refresh }) {
 
   useEffect(() => setLocalMatches(dashboard?.matches || []), [dashboard?.matches]);
 
-  // 3.7: scroll to the playdate a notification linked to, if it's currently rendered
-  // here (e.g. in the top-3 Upcoming list). If it's not — completed, or bumped out of
-  // the top 3 — this is a graceful no-op rather than a broken/blank screen, since
-  // PlaydateCard's existing render logic (and this page's own filtering) are otherwise
-  // untouched; not building a new "find this playdate anywhere" view for this pass.
+  // 3.7/5.7: scroll to the playdate a notification linked to, if it's currently
+  // rendered here (e.g. in Waiting on You, or the visible slice of Coming Up). If
+  // it's not — completed, or not in the visible top-2 — this used to be a silent
+  // no-op; now it's at least a toast explaining why, rather than building the full
+  // "find this playdate anywhere" view, which stays out of scope. Deliberately not
+  // depending on `dashboard` here (only location.state) so an unrelated dashboard
+  // refresh elsewhere doesn't re-fire this and re-toast; a slightly stale read of
+  // dashboard for the toast wording is an acceptable tradeoff for that.
   useEffect(() => {
     const targetId = location.state?.highlightPlaydateId;
     if (!targetId) return;
     const el = document.querySelector(`[data-testid="playdate-card-${targetId}"]`);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    const target = (dashboard?.playdates || []).find((p) => p.playdate_id === targetId);
+    if (target?.status === "completed") toast("That playdate has already completed");
+    else if (target) toast("That playdate isn't shown here right now");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.state]);
 
   const proposeMatch = (match) => {
@@ -402,12 +432,38 @@ function HomePage({ user, dashboard, refresh }) {
           </div>
         </section>
 
-        <section className="stack" data-testid="home-upcoming-section">
-          <h2 className="section-title" data-testid="home-upcoming-title">Upcoming</h2>
-          {upcoming.length ? upcoming.map((playdate) => (
-            <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />
-          )) : <div className="empty-state card" data-testid="home-empty-upcoming">No playdates yet. Community availability is ready when you are.</div>}
-        </section>
+        {/* 5.6: each section omitted entirely when empty — no "nothing here"
+            placeholder per section, neither is collapsible. The one overall empty
+            state below only shows when BOTH are empty (a genuinely new parent). */}
+        {!!waitingOnYou.length && (
+          <section className="stack" data-testid="home-waiting-section">
+            <h2 className="section-title" data-testid="home-waiting-title">Waiting on You</h2>
+            {waitingOnYou.map((playdate) => (
+              <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />
+            ))}
+          </section>
+        )}
+
+        {!!comingUp.length && (
+          <section className="stack" data-testid="home-coming-up-section">
+            <h2 className="section-title" data-testid="home-coming-up-title">Coming Up</h2>
+            {visibleComingUp.map((playdate) => (
+              <PlaydateCard key={playdate.playdate_id} playdate={playdate} user={user} dashboard={dashboard} refresh={refresh} />
+            ))}
+            {comingUp.length > 2 && !showAllComingUp && (
+              <button className="text-link" onClick={() => setShowAllComingUp(true)} data-testid="home-coming-up-see-all">
+                See all {comingUp.length}
+              </button>
+            )}
+          </section>
+        )}
+
+        {!waitingOnYou.length && !comingUp.length && (
+          <section className="stack" data-testid="home-upcoming-section">
+            <h2 className="section-title" data-testid="home-upcoming-title">Upcoming</h2>
+            <div className="empty-state card" data-testid="home-empty-upcoming">No playdates yet. Community availability is ready when you are.</div>
+          </section>
+        )}
 
         <section className="stack" data-testid="home-activity-section">
           <h2 className="section-title" data-testid="home-activity-title">Activity</h2>
@@ -922,32 +978,52 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
 
   if (!childRows.length) {
     const gradeCommunity = activeChild && dashboard?.communities?.find((c) => c.master_community_id && c.name.endsWith(activeChild.grade));
+    // 5.5: distinguish a genuinely empty community (nobody else has joined) from one
+    // where members exist but just haven't started sharing yet — these need different
+    // next steps (invite others vs. request sharing), and looked identical before.
+    const hasPeers = (feedData.peer_count || 0) > 0;
     return (
       <div className="card empty-state stack" data-testid="who-free-empty-state">
-        <h3 className="card-title">No one's sharing with {activeChild?.first_name || "your child"} yet</h3>
-        <p className="muted">Families in {activeChild?.grade || "your child's grade"} choose who sees their open time. Ask a family to share, and their calendar shows up here.</p>
-        <button
-          className="button primary"
-          onClick={() => {
-            if (gradeCommunity) {
-              navigate("/community", { state: { communityId: gradeCommunity.community_id } });
-            } else {
-              toast.error("Join a grade community first from the Community tab");
-              navigate("/community");
-            }
-          }}
-          data-testid="who-free-empty-find-button"
-        >
-          Find families in {activeChild?.grade || "your grade"}
-        </button>
-        {gradeCommunity?.join_slug && (
-          <button
-            className="text-link"
-            onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/join/${gradeCommunity.join_slug}`); toast.success("Link copied"); }}
-            data-testid="who-free-empty-invite-link"
-          >
-            Invite a family by link
-          </button>
+        {hasPeers ? (
+          <>
+            <h3 className="card-title" data-testid="who-free-empty-title">No one's sharing with {activeChild?.first_name || "your child"} yet</h3>
+            <p className="muted">Families in {activeChild?.grade || "your child's grade"} are already there — nobody's shared their open time with you yet. Request sharing and their calendar shows up here.</p>
+            <button
+              className="button primary"
+              onClick={() => navigate("/community", gradeCommunity ? { state: { communityId: gradeCommunity.community_id } } : undefined)}
+              data-testid="who-free-empty-request-button"
+            >
+              Request sharing in {activeChild?.grade || "your grade"}
+            </button>
+          </>
+        ) : (
+          <>
+            <h3 className="card-title" data-testid="who-free-empty-title">No one else in {activeChild?.grade || "your child's grade"} yet</h3>
+            <p className="muted">Be the first to invite other families — once they join and share their open time, their calendar shows up here.</p>
+            <button
+              className="button primary"
+              onClick={() => {
+                if (gradeCommunity) {
+                  navigate("/community", { state: { communityId: gradeCommunity.community_id } });
+                } else {
+                  toast.error("Join a grade community first from the Community tab");
+                  navigate("/community");
+                }
+              }}
+              data-testid="who-free-empty-find-button"
+            >
+              Find or join a community
+            </button>
+            {gradeCommunity?.join_slug && (
+              <button
+                className="text-link"
+                onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/join/${gradeCommunity.join_slug}`); toast.success("Link copied"); }}
+                data-testid="who-free-empty-invite-link"
+              >
+                Invite a family by link
+              </button>
+            )}
+          </>
         )}
       </div>
     );
@@ -1021,7 +1097,23 @@ function WhoFreeFeed({ activeChild, dashboard, onPropose }) {
           <p className="muted" style={{ fontSize: 12 }} data-testid="who-free-held-hint">Slots marked <strong>waiting</strong> already have a proposal pending. They free up again if that family declines.</p>
         </>
       ) : (
-        <div className="empty-state card" data-testid="who-free-filter-empty">No families match this filter yet.</div>
+        <div className="empty-state card stack" data-testid="who-free-filter-empty">
+          {/* 5.4: distinct from a generic filter miss — shares are active (childRows is
+              non-empty here), it's specifically that nothing overlaps this week. */}
+          {filter === "When we're both free" ? (
+            <>
+              <p data-testid="who-free-filter-empty-title">Nothing overlaps with your open time this week.</p>
+              <p className="muted">Try "Free this week" to see all their openings, or widen your own availability to catch more overlap.</p>
+            </>
+          ) : filter === "Free this week" ? (
+            <>
+              <p data-testid="who-free-filter-empty-title">No openings from these families in the next 7 days.</p>
+              <p className="muted">Check "All families" to see what's further out.</p>
+            </>
+          ) : (
+            <p data-testid="who-free-filter-empty-title">No families match this filter yet.</p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -1718,9 +1810,20 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
   const [showReschedule, setShowReschedule] = useState(false);
   const [showCancel, setShowCancel] = useState(false);
   const [showDecline, setShowDecline] = useState(false);
+  const [showCounter, setShowCounter] = useState(false);
   const isSender = playdate.organizer_id === user.user_id;
   const sentCounter = playdate.counter?.from_parent_id === user.user_id;
   const accepted = playdate.participants?.filter((p) => p.rsvp_status === "accepted") || [];
+  // 5.2: withdraw only works for the organizer (backend restricts it to organizer_id)
+  // and only on proposed/countered — reschedule_pending is a modification request on
+  // an already-confirmed playdate, so "Cancel" (the real cancel endpoint) is the
+  // semantically correct action there, not "Withdraw" (which the backend wouldn't
+  // even accept for that status). "Waiting" here means: this is the sender's own
+  // pre-response state, shown alongside the sent-time.
+  const isWaitingSender = isSender && (playdate.status === "proposed" || (playdate.status === "countered" && sentCounter));
+  const cancelledByName = playdate.status === "cancelled" && playdate.cancelled_by
+    ? playdate.participants?.find((p) => p.parent_id === playdate.cancelled_by)?.parent?.name
+    : null;
   const respond = async (action) => {
     try {
       const response = await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action }) });
@@ -1756,11 +1859,27 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
       {showingCounter && <p className="hint-line" data-testid={`playdate-counter-hint-${playdate.playdate_id}`}>↳ New time suggested</p>}
       <p className="muted" data-testid={`playdate-detail-${playdate.playdate_id}`}><CalendarDays size={15} /> {fmtDate(displayDate, { weekday: "long", month: "short", day: "numeric" })} · {timeLabel(displayStart)}–{timeLabel(displayEnd)}</p>
       <p className="muted" data-testid={`playdate-location-${playdate.playdate_id}`}><MapPin size={15} /> {playdate.location} · {playdate.activity}</p>
+      {/* 5.2: sent-time on the sender's own pre-response (waiting) state */}
+      {isWaitingSender && playdate.created_at && (
+        <p className="muted" data-testid={`playdate-sent-${playdate.playdate_id}`}>Sent {fmtDate(playdate.created_at.slice(0, 10), { month: "short", day: "numeric" })}</p>
+      )}
+      {/* 5.3: cancellation_reason/cancelled_by were already stored server-side but
+          never rendered anywhere — cancelled_by's name is resolved from the
+          already-fetched participants array, no new backend field needed. */}
+      {playdate.status === "cancelled" && (
+        <p className="muted" data-testid={`playdate-cancellation-${playdate.playdate_id}`}>
+          Cancelled{cancelledByName ? ` by ${cancelledByName}` : ""}{playdate.cancellation_reason ? `: ${playdate.cancellation_reason}` : ""}
+        </p>
+      )}
       <div className="chip-row" data-testid={`playdate-participants-${playdate.playdate_id}`}>{accepted.map((p) => <span className="pill" key={p.parent_id}>{p.parent?.name?.split(" ")[0] || "Parent"}</span>)}</div>
       <div className="playdate-actions">
         {playdate.status === "proposed" && !isSender && (
           <>
             <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            {/* 5.1: Counter promoted to a top-level button, no longer nested inside
+                Decline — applies here and to the countered/reschedule_pending receiver
+                case below too, since both share the exact same pattern. */}
+            <button className="button secondary" onClick={() => setShowCounter(true)} data-testid={`playdate-counter-${playdate.playdate_id}`}>Suggest a time</button>
             <button className="button secondary" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
           </>
         )}
@@ -1770,10 +1889,20 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
         {["countered", "reschedule_pending"].includes(playdate.status) && !sentCounter && (
           <>
             <button className="button primary" onClick={() => respond("accept")} data-testid={`playdate-accept-${playdate.playdate_id}`}><Check size={16} /> Accept</button>
+            <button className="button secondary" onClick={() => setShowCounter(true)} data-testid={`playdate-counter-${playdate.playdate_id}`}>Suggest a time</button>
             <button className="button secondary" onClick={() => setShowDecline(true)} data-testid={`playdate-decline-${playdate.playdate_id}`}>Decline</button>
           </>
         )}
-        {["countered", "reschedule_pending"].includes(playdate.status) && sentCounter && (
+        {/* 5.2: countered + sent-by-organizer is a pre-response "waiting" state on a
+            never-yet-confirmed negotiation, so Withdraw (backend allows it for
+            organizer + countered) is correct — not Cancel, which implies undoing a
+            real booking. reschedule_pending is that real case (a modification request
+            on an already-confirmed playdate), so it keeps Cancel; same for a
+            non-organizer's countered wait, since withdraw is organizer-only server-side. */}
+        {playdate.status === "countered" && sentCounter && isSender && (
+          <button className="button secondary" onClick={() => respond("withdraw")} data-testid={`playdate-withdraw-${playdate.playdate_id}`}>Withdraw</button>
+        )}
+        {((playdate.status === "countered" && sentCounter && !isSender) || (playdate.status === "reschedule_pending" && sentCounter)) && (
           <button className="button secondary" onClick={() => setShowCancel(true)} data-testid={`playdate-cancel-${playdate.playdate_id}`}>Cancel</button>
         )}
         {chatAvailable && <button className="button blue-outline" onClick={() => setShowChat(true)} data-testid={`playdate-chat-${playdate.playdate_id}`}><MessageCircle size={16} /> Chat</button>}
@@ -1785,11 +1914,12 @@ function PlaydateCard({ playdate, user, dashboard, refresh }) {
           </>
         )}
       </div>
+      {showCounter && <CounterModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowCounter(false)} />}
       {showChat && <ChatModal playdate={playdate} user={user} onClose={() => setShowChat(false)} />}
       {showReschedule && <RescheduleModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowReschedule(false)} />}
       {showComplete && <CompletionModal playdate={playdate} refresh={refresh} onClose={() => setShowComplete(false)} />}
       {showCancel && <CancelModal playdate={playdate} refresh={refresh} onClose={() => setShowCancel(false)} />}
-      {showDecline && <DeclineOrSuggestModal playdate={playdate} dashboard={dashboard} refresh={refresh} onClose={() => setShowDecline(false)} />}
+      {showDecline && <DeclineOrSuggestModal playdate={playdate} refresh={refresh} onClose={() => setShowDecline(false)} />}
     </article>
   );
 }
@@ -1831,7 +1961,10 @@ function RescheduleModal({ playdate, dashboard, refresh, onClose }) {
   );
 }
 
-function DeclineOrSuggestModal({ playdate, dashboard, refresh, onClose }) {
+function CounterModal({ playdate, dashboard, refresh, onClose }) {
+  // 5.1: extracted from what used to be DeclineOrSuggestModal's bundled
+  // suggest-a-time section — now reachable directly from a top-level "Suggest a
+  // time" button, not nested behind Decline.
   const organizer = playdate.participants?.find((p) => p.parent_id === playdate.organizer_id)?.parent;
   const [date, setDate] = useState(playdate.date);
   const [start, setStart] = useState(playdate.start_time);
@@ -1848,6 +1981,43 @@ function DeclineOrSuggestModal({ playdate, dashboard, refresh, onClose }) {
     } catch (error) { toast.error(error.message); }
   };
 
+  return (
+    <div className="center-overlay" data-testid="counter-modal-overlay">
+      <section className="modal-panel stack" data-testid="counter-modal">
+        <div className="sheet-title-row"><h3 data-testid="counter-title">Suggest a different time</h3><button className="icon-button" onClick={onClose} data-testid="counter-close-button"><X size={20} /></button></div>
+        <p className="muted">Propose a new time to {organizer?.name || "them"}.</p>
+        {upcomingSlots.length > 0 && (
+          <div className="stack" data-testid="counter-slots">
+            <h4 className="section-label">FROM YOUR AVAILABILITY</h4>
+            {upcomingSlots.slice(0, 5).flatMap((slot) => (slot.blocks || []).map((block, i) => (
+              <button
+                key={`${slot.date}-${i}`}
+                className="slot-pill"
+                onClick={() => sendCounter(slot.date, block.start, block.end)}
+                data-testid={`counter-slot-${slot.date}-${i}`}
+              >
+                {fmtDate(slot.date, { weekday: "short", month: "short", day: "numeric" })} · {timeLabel(block.start)}–{timeLabel(block.end)}
+              </button>
+            )))}
+          </div>
+        )}
+        <div className="stack">
+          <h4 className="section-label">OR PICK A CUSTOM TIME</h4>
+          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="counter-date-input" />
+          <div className="row" style={{ gap: 8 }}>
+            <select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="counter-start-select">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+            <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="counter-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
+          </div>
+          <button className="button primary" onClick={() => sendCounter(date, start, end)} data-testid="counter-submit-button">Suggest this time</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DeclineOrSuggestModal({ playdate, refresh, onClose }) {
+  // 5.1: simplified to a plain decline-confirm now that suggesting a time has its
+  // own top-level entry point (CounterModal) — no longer needs to bundle both.
   const declineOutright = async () => {
     try {
       await api(`/playdates/${playdate.playdate_id}/respond`, { method: "POST", body: JSON.stringify({ action: "decline" }) });
@@ -1860,33 +2030,10 @@ function DeclineOrSuggestModal({ playdate, dashboard, refresh, onClose }) {
   return (
     <div className="center-overlay" data-testid="decline-suggest-modal-overlay">
       <section className="modal-panel stack" data-testid="decline-suggest-modal">
-        <div className="sheet-title-row"><h3 data-testid="decline-suggest-title">Can't make it?</h3><button className="icon-button" onClick={onClose} data-testid="decline-suggest-close-button"><X size={20} /></button></div>
-        <p className="muted">Suggest another time for {organizer?.name || "them"} instead of declining outright — or just decline below.</p>
-        {upcomingSlots.length > 0 && (
-          <div className="stack" data-testid="decline-suggest-slots">
-            <h4 className="section-label">FROM YOUR AVAILABILITY</h4>
-            {upcomingSlots.slice(0, 5).flatMap((slot) => (slot.blocks || []).map((block, i) => (
-              <button
-                key={`${slot.date}-${i}`}
-                className="slot-pill"
-                onClick={() => sendCounter(slot.date, block.start, block.end)}
-                data-testid={`decline-suggest-slot-${slot.date}-${i}`}
-              >
-                {fmtDate(slot.date, { weekday: "short", month: "short", day: "numeric" })} · {timeLabel(block.start)}–{timeLabel(block.end)}
-              </button>
-            )))}
-          </div>
-        )}
-        <div className="stack">
-          <h4 className="section-label">OR PICK A CUSTOM TIME</h4>
-          <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="decline-suggest-date-input" />
-          <div className="row" style={{ gap: 8 }}>
-            <select className="select" value={start} onChange={(e) => setStart(e.target.value)} data-testid="decline-suggest-start-select">{timeOptions.slice(0, -1).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
-            <select className="select" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="decline-suggest-end-select">{timeOptions.filter((t) => minutes(t) > minutes(start)).map((t) => <option key={t} value={t}>{timeLabel(t)}</option>)}</select>
-          </div>
-          <button className="button primary" onClick={() => sendCounter(date, start, end)} data-testid="decline-suggest-submit-button">Suggest this time</button>
-        </div>
-        <button className="button ghost" onClick={declineOutright} data-testid="decline-suggest-decline-button">Just decline</button>
+        <div className="sheet-title-row"><h3 data-testid="decline-suggest-title">Decline this playdate?</h3><button className="icon-button" onClick={onClose} data-testid="decline-suggest-close-button"><X size={20} /></button></div>
+        <p className="muted">The other family will be notified. Want to suggest a different time instead? Close this and use "Suggest a time".</p>
+        <button className="button primary" onClick={declineOutright} data-testid="decline-suggest-decline-button">Decline</button>
+        <button className="button secondary" onClick={onClose} data-testid="decline-suggest-cancel-button">Never mind</button>
       </section>
     </div>
   );

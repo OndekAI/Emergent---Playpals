@@ -1693,7 +1693,12 @@ async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
 
 @api_router.get("/community-feed")
 async def community_feed(user: Dict[str, Any] = Depends(current_user)):
-    return {"rows": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"])}
+    # 5.5: peer_count (community co-members, independent of sharing/visibility) lets
+    # the frontend tell a genuinely-empty community apart from one where members
+    # exist but haven't started sharing — rows alone can't distinguish those, since
+    # an empty rows list looks identical either way.
+    peer_count = len(await common_community_parent_ids(user["user_id"]))
+    return {"rows": await availability_feed(user["user_id"]), "matches": await find_matches(user["user_id"]), "peer_count": peer_count}
 
 
 @api_router.get("/community-members")
