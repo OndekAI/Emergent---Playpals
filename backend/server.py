@@ -789,6 +789,9 @@ async def find_overlapping_same_child_playdate(parent_id: str, child_ids: List[s
     return None
 
 
+SAMPLE_PARENT_IDS = ["sample_sarah", "sample_michelle", "sample_david", "sample_priya"]
+
+
 async def ensure_global_seed() -> None:
     communities = [
         {"community_id": "comm_mulgrave", "name": "Mulgrave School", "type": "school", "city": "West Vancouver", "master_community_id": None},
@@ -2412,6 +2415,20 @@ async def startup_seed():
         {"$set": {"interests.$[elem]": "Sports"}},
         array_filters=[{"elem": "Soccer"}],
     )
+
+    # One-time cleanup: delete the ensure_global_seed() demo/test families outright
+    # (sample_sarah/michelle/david/priya) — confirmed test data, not real families.
+    # Removes their identity/membership/availability records only; deliberately not
+    # cascading into playdates, notifications, credits, dismissals, etc. if any
+    # exist — same reasoning as the P0-2 remove-member decision (don't retroactively
+    # rewrite existing history), and public_parents_map()/children_map_for_parents()
+    # already resolve a missing parent_id to None rather than erroring, so a stray
+    # reference elsewhere degrades gracefully instead of breaking. No-op on every
+    # subsequent startup once these records are gone.
+    await db.users.delete_many({"user_id": {"$in": SAMPLE_PARENT_IDS}})
+    await db.children.delete_many({"parent_id": {"$in": SAMPLE_PARENT_IDS}})
+    await db.community_members.delete_many({"parent_id": {"$in": SAMPLE_PARENT_IDS}})
+    await db.availability_slots.delete_many({"parent_id": {"$in": SAMPLE_PARENT_IDS}})
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
