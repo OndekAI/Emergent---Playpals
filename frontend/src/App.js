@@ -1580,14 +1580,74 @@ function ParentRow({ parent }) {
 
 function ParentProfileSheet({ parent, onClose }) {
   const [status, setStatus] = useState(parent.share_status || "none");
+  const [confirmingBlock, setConfirmingBlock] = useState(false);
+  const [blocked, setBlocked] = useState(false);
   const child = firstChild(parent.children);
-  const request = async () => { try { const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parent.user_id }) }); setStatus(result.status === "approved" ? "approved" : "pending_sent"); toast.success(result.status === "approved" ? `✓ You're now sharing availability with ${parent.name} 🎉` : "Request sent"); } catch (error) { toast.error(error.message); } };
-  return <div className="sheet-overlay" data-testid="parent-profile-sheet"><section className="bottom-sheet centered-sheet"><div className="drag-handle" /><button className="icon-button sheet-close" onClick={onClose}><X size={18} /></button><div className="avatar-circle" style={{ width: 56, height: 56, margin: "0 auto" }}>{parent.name?.[0]}</div><h2>{parent.name}</h2><p className="muted">{child.first_name} · age {child.age}</p><span className="badge sage">{tierText(parent)}</span><div className="chip-row centered">{(child.interests || []).map((interest) => <span className="interest-pill" key={interest}>{interest}</span>)}</div><hr />{
-    status === "approved" ? <span className="badge sage">✓ Sharing availability</span>
-    : status === "pending_sent" ? <span className="badge amber">Request sent — waiting for response</span>
-    : status === "pending_received" ? <span className="badge blue">They asked to share with you — respond from Home</span>
-    : <button className="button secondary" onClick={request}>Request to share availability</button>
-  }</section></div>;
+
+  const request = async () => {
+    try {
+      const result = await api("/availability-share-requests", { method: "POST", body: JSON.stringify({ target_parent_id: parent.user_id }) });
+      setStatus(result.status === "approved" ? "approved" : "pending_sent");
+      toast.success(result.status === "approved" ? `✓ You're now sharing availability with ${parent.name} 🎉` : "Request sent");
+    } catch (error) { toast.error(error.message); }
+  };
+
+  // P0-1: this is the app's one existing "parent profile" surface (reached from the
+  // Community member list via ParentRow) — Who's Free feed cards have no equivalent
+  // profile view, just inline actions, so that's not a second entry point here.
+  // Silent on the backend (no notification to the blocked party) per the same
+  // reasoning as the Phase 4 revoke decision; the two-step confirm here is purely a
+  // local guard against an accidental tap, not anything the other party sees either.
+  const block = async () => {
+    try {
+      await api("/parent-blocks", { method: "POST", body: JSON.stringify({ target_parent_id: parent.user_id }) });
+      setBlocked(true);
+    } catch (error) { toast.error(error.message); }
+  };
+
+  if (blocked) {
+    return (
+      <div className="sheet-overlay" data-testid="parent-profile-sheet">
+        <section className="bottom-sheet centered-sheet">
+          <div className="drag-handle" />
+          <button className="icon-button sheet-close" onClick={onClose} data-testid="parent-profile-blocked-close"><X size={18} /></button>
+          <h2>Blocked</h2>
+          <p className="muted">You won't see {parent.name}'s availability anymore, and they can't propose playdates to you.</p>
+          <button className="button secondary" onClick={onClose} data-testid="parent-profile-blocked-done">Done</button>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sheet-overlay" data-testid="parent-profile-sheet">
+      <section className="bottom-sheet centered-sheet">
+        <div className="drag-handle" />
+        <button className="icon-button sheet-close" onClick={onClose} data-testid="parent-profile-close"><X size={18} /></button>
+        <div className="avatar-circle" style={{ width: 56, height: 56, margin: "0 auto" }}>{parent.name?.[0]}</div>
+        <h2>{parent.name}</h2>
+        <p className="muted">{child.first_name} · age {child.age}</p>
+        <span className="badge sage">{tierText(parent)}</span>
+        <div className="chip-row centered">{(child.interests || []).map((interest) => <span className="interest-pill" key={interest}>{interest}</span>)}</div>
+        <hr />
+        {status === "approved" ? <span className="badge sage">✓ Sharing availability</span>
+          : status === "pending_sent" ? <span className="badge amber">Request sent — waiting for response</span>
+          : status === "pending_received" ? <span className="badge blue">They asked to share with you — respond from Home</span>
+          : <button className="button secondary" onClick={request} data-testid="parent-profile-share-request">Request to share availability</button>}
+        <hr />
+        {confirmingBlock ? (
+          <div className="stack" data-testid="parent-profile-block-confirm">
+            <p className="muted">Block {parent.name}? You won't see their availability, and they can't propose to you. They won't be told.</p>
+            <button className="button secondary" onClick={block} data-testid="parent-profile-block-confirm-button">Yes, block</button>
+            <button className="button ghost" onClick={() => setConfirmingBlock(false)} data-testid="parent-profile-block-cancel">Never mind</button>
+          </div>
+        ) : (
+          <button className="text-link" onClick={() => setConfirmingBlock(true)} data-testid="parent-profile-block-open">Block this family</button>
+        )}
+        <a href="mailto:priti@ondek.co?subject=Safety%20concern" className="text-link" data-testid="parent-profile-contact-us">Safety concern? Contact us</a>
+      </section>
+    </div>
+  );
 }
 
 function CreateCommunityModal({ onClose, refreshAll }) {

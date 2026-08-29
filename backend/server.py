@@ -225,6 +225,15 @@ class MatchDismissalCreate(BaseModel):
     dismissal_type: str
 
 
+class ParentBlockCreate(BaseModel):
+    target_parent_id: str
+
+
+class CommunityMemberRemoveRequest(BaseModel):
+    community_id: str
+    parent_email: str
+
+
 INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
 GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"]
 CHILD_STATUSES = ["active", "graduate", "alumni", "on_a_break", "moved_on"]
@@ -441,6 +450,7 @@ async def upsert_user(email: str, name: Optional[str] = None, picture: Optional[
             updates["picture"] = picture
         await db.users.update_one({"user_id": existing["user_id"]}, {"$set": updates})
         existing.update(updates)
+        await log_event("login", existing["user_id"])
         return existing
 
     user = {
@@ -457,6 +467,7 @@ async def upsert_user(email: str, name: Optional[str] = None, picture: Optional[
     }
     await db.users.insert_one(user.copy())
     await add_credit(user["user_id"], 0, "account_created", user["user_id"])
+    await log_event("signup", user["user_id"])
     return user
 
 
@@ -471,6 +482,20 @@ async def add_credit(parent_id: str, amount: int, action_type: str, reference_id
             "created_at": now_iso(),
         }
     )
+
+
+async def log_event(event_type: str, parent_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+    # P0-4: a MongoDB collection, not a third-party analytics tool. Fire-and-forget —
+    # a logging failure must never break the actual request it's attached to.
+    try:
+        await db.events.insert_one({
+            "event_type": event_type,
+            "parent_id": parent_id,
+            "timestamp": now_iso(),
+            "metadata": metadata or {},
+        })
+    except Exception:
+        logger.exception(f"log_event failed for {event_type}/{parent_id}")
 
 
 async def credit_total(parent_id: str) -> int:
@@ -685,6 +710,10 @@ async def apply_playdate_completion(playdate: Dict[str, Any]) -> None:
         amount = 2 if participant["parent_id"] == playdate["organizer_id"] else 1
         await add_credit(participant["parent_id"], amount, "completed_playdate", playdate_id)
         await notify_parent(participant["parent_id"], "Hope it was a blast! 🎉", "Your PlayPals credits have been added.", "credits", playdate_id)
+    # P0-4: single hook for both triggers (manual /complete and the Phase 2
+    # auto-complete timer both call this), logged once per playdate against the
+    # organizer rather than once per participant.
+    await log_event("playdate_completed", playdate["organizer_id"], {"playdate_id": playdate_id})
 
 
 async def apply_counter_proposal(playdate_id: str, playdate: Dict[str, Any], from_parent_id: str, date_value: str, start_time: str, end_time: str, new_status: str) -> None:
@@ -984,6 +1013,7 @@ async def create_child(payload: ChildCreate, user: Dict[str, Any] = Depends(curr
     }
     await db.children.insert_one(child.copy())
     await add_credit(user["user_id"], 1, "completed_child_profile", child["child_id"])
+    await log_event("child_profile_completed", user["user_id"], {"child_id": child["child_id"]})
     return child
 
 
@@ -1079,6 +1109,9 @@ async def save_availability(payload: AvailabilityCreate, user: Dict[str, Any] = 
             }
             await db.availability_slots.insert_one(doc.copy())
             saved.append(doc)
+    # P0-4: once per save call, not once per generated slot doc (a weekly recurrence
+    # can generate dozens) — the metadata carries the count for anyone who needs it.
+    await log_event("availability_created", user["user_id"], {"date": payload.date, "recurrence": payload.recurrence, "slot_count": len(saved)})
     return {"saved": saved[:60], "count": len(saved)}
 
 
@@ -1245,6 +1278,7 @@ async def create_community(payload: CommunityCreate, user: Dict[str, Any] = Depe
     if is_admin:
         await db.community_members.insert_one({"membership_id": new_id("member"), "community_id": community["community_id"], "parent_id": user["user_id"], "status": "active", "sponsor_id": None, "joined_at": now_iso(), "provisional_expires_at": None})
         await add_credit(user["user_id"], 5, "community_creator", community["community_id"])
+    await log_event("community_created", user["user_id"], {"community_id": community["community_id"], "status": status})
     return {"created": True, "community": community, "duplicate_check": duplicate}
 
 
@@ -1407,6 +1441,29 @@ async def add_family(payload: AddFamilyRequest, admin: Dict[str, Any] = Depends(
     return {"parent_id": user["user_id"], "child_ids": child_ids, "status": "added"}
 
 
+@api_router.post("/admin/community-members/remove")
+async def admin_remove_community_member(payload: CommunityMemberRemoveRequest, admin: Dict[str, Any] = Depends(require_admin)):
+    # P0-2: backend-only, no admin UI — meant to be curled directly. Accepts an
+    # email rather than a raw parent_id/membership_id since that's what a founder
+    # actually has on hand when acting on a report, matching add_family's existing
+    # email-lookup convention.
+    parent = await db.users.find_one({"email": clean_email(payload.parent_email)}, {"_id": 0})
+    if not parent:
+        raise HTTPException(status_code=404, detail="No parent found with that email")
+    membership = await db.community_members.find_one({"community_id": payload.community_id, "parent_id": parent["user_id"]}, {"_id": 0})
+    if not membership:
+        raise HTTPException(status_code=404, detail="This parent is not a member of that community")
+    await db.community_members.update_one({"membership_id": membership["membership_id"]}, {"$set": {"status": "removed", "removed_at": now_iso(), "removed_by": admin["user_id"]}})
+    # Existing confirmed/pending playdates are left intact — consistent with the
+    # Phase 4 in-flight-proposal philosophy, don't retroactively cancel something
+    # already scheduled/negotiated. Going forward, "removed" isn't in the
+    # active/provisional/pending_sponsor set common_community_parent_ids filters
+    # on, so this parent drops out of both their own peer list and everyone
+    # else's for this community symmetrically — no other code changes needed for
+    # feed/matching/new-proposal visibility.
+    return {"status": "removed", "community_id": payload.community_id, "parent_id": parent["user_id"]}
+
+
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
     # Silent bookkeeping only: a grade member should also hold an active
     # membership in the grade's master (school) community, even though there's
@@ -1454,6 +1511,7 @@ async def join_community(payload: JoinCommunityRequest, user: Dict[str, Any] = D
     await db.community_members.insert_one(membership.copy())
     await ensure_master_membership(community, user["user_id"])
     await notify_parent(user["user_id"], "Community joined", f"You're now a member of {community['name']}.", "community", payload.community_id)
+    await log_event("community_joined", user["user_id"], {"community_id": payload.community_id})
     return {"membership": membership, "community": community, "already_member": False}
 
 
@@ -1499,6 +1557,10 @@ async def approve_availability_share(share: Dict[str, Any], approver_name: str) 
     await add_credit(share["target_parent_id"], 1, "availability_share", share["requester_parent_id"])
     await add_credit(share["requester_parent_id"], 1, "availability_share", share["target_parent_id"])
     await notify_parent(share["requester_parent_id"], "Availability sharing approved", f"You're now sharing availability with {approver_name} 🎉", "availability_share", share["request_id"])
+    # P0-4: one hook covers both call sites (explicit approve, and the 4.3
+    # crossing-request auto-resolve) — logged against the target/approver, since
+    # they're the one taking the action either way.
+    await log_event("share_approved", share["target_parent_id"], {"request_id": share["request_id"], "other_parent_id": share["requester_parent_id"]})
 
 
 @api_router.post("/availability-share-requests")
@@ -1527,6 +1589,7 @@ async def request_availability_share(payload: AvailabilityShareRequestCreate, us
     request_doc = {"request_id": new_id("share"), "requester_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "community_id": payload.community_id, "status": "pending", "created_at": now_iso(), "responded_at": None}
     await db.availability_share_requests.insert_one(request_doc.copy())
     await notify_parent(payload.target_parent_id, "Availability share request", f"{user['name']} wants to share availability with you", "availability_share", request_doc["request_id"])
+    await log_event("share_request_sent", user["user_id"], {"request_id": request_doc["request_id"], "target_parent_id": payload.target_parent_id})
     return request_doc
 
 
@@ -1593,6 +1656,22 @@ async def dismiss_match(payload: MatchDismissalCreate, user: Dict[str, Any] = De
         raise HTTPException(status_code=400, detail="Invalid dismissal type")
     doc = {"dismissal_id": new_id("dismiss"), "dismisser_parent_id": user["user_id"], "target_parent_id": payload.target_parent_id, "dismissal_type": payload.dismissal_type, "created_at": now_iso()}
     await db.match_dismissals.insert_one(doc.copy())
+    await log_event("match_rejected", user["user_id"], {"target_parent_id": payload.target_parent_id, "dismissal_type": payload.dismissal_type})
+    return doc
+
+
+@api_router.post("/parent-blocks")
+async def create_parent_block(payload: ParentBlockCreate, user: Dict[str, Any] = Depends(current_user)):
+    if payload.target_parent_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Cannot block yourself")
+    existing = await db.parent_blocks.find_one({"blocker_parent_id": user["user_id"], "blocked_parent_id": payload.target_parent_id}, {"_id": 0})
+    if existing:
+        return existing
+    doc = {"block_id": new_id("block"), "blocker_parent_id": user["user_id"], "blocked_parent_id": payload.target_parent_id, "created_at": now_iso()}
+    await db.parent_blocks.insert_one(doc.copy())
+    # P0-1.5: deliberately silent — no notify_parent call, same reasoning as the
+    # Phase 4 revoke decision: telling someone they've been blocked manufactures
+    # exactly the social friction this is meant to avoid.
     return doc
 
 
@@ -1642,8 +1721,24 @@ async def shared_availability_parent_ids(parent_id: str) -> List[str]:
     return list({s["target_parent_id"] if s["requester_parent_id"] == parent_id else s["requester_parent_id"] for s in shares})
 
 
+async def blocked_peer_ids(parent_id: str) -> Set[str]:
+    # P0-1/P0-3: mutual in either direction — if parent_id blocked someone, or was
+    # blocked by them, neither should see the other's availability or match against
+    # them. Deliberately a separate function from suppressed_peer_ids (which handles
+    # match_dismissals): dismissals are soft/match-suggestion-only and only ever
+    # applied within find_matches, while a block needs to be total — it also has to
+    # hide real availability in the Who's Free feed, not just suggestions — so it's
+    # applied one level up, in visible_peer_ids, which both availability_feed and
+    # find_matches build on.
+    blocks = await db.parent_blocks.find({
+        "$or": [{"blocker_parent_id": parent_id}, {"blocked_parent_id": parent_id}],
+    }, {"_id": 0}).to_list(500)
+    return {b["blocked_parent_id"] if b["blocker_parent_id"] == parent_id else b["blocker_parent_id"] for b in blocks}
+
+
 async def visible_peer_ids(parent_id: str) -> List[str]:
-    return list(set(await common_community_parent_ids(parent_id)) | set(await shared_availability_parent_ids(parent_id)))
+    peers = set(await common_community_parent_ids(parent_id)) | set(await shared_availability_parent_ids(parent_id))
+    return list(peers - await blocked_peer_ids(parent_id))
 
 
 async def availability_feed(parent_id: str) -> List[Dict[str, Any]]:
@@ -1779,7 +1874,14 @@ async def find_matches(parent_id: str) -> List[Dict[str, Any]]:
         seen_patterns.add(pattern_key)
         collapsed.append(m)
     collapsed.sort(key=lambda row: row["duration_minutes"], reverse=True)
-    return collapsed[:8]
+    final = collapsed[:8]
+    # P0-4: once per call (not once per match) — as specified, this fires whenever
+    # find_matches returns results. Worth flagging: find_matches is called from both
+    # /dashboard and /community-feed, so this will log on most page loads that have
+    # any matches at all, not just when a genuinely new match first appears.
+    if final:
+        await log_event("match_generated", parent_id, {"count": len(final)})
+    return final
 
 
 async def get_playdates_for_parent(parent_id: str) -> List[Dict[str, Any]]:
@@ -1817,6 +1919,17 @@ async def list_playdates(user: Dict[str, Any] = Depends(current_user)):
 
 @api_router.post("/playdates")
 async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depends(current_user)):
+    # P0-1.3: server-side, not just hidden in the UI — a determined party
+    # shouldn't be able to propose via a stale cached slot_id from before a block
+    # existed. Checked in either direction, same as visible_peer_ids.
+    blocked = await db.parent_blocks.find_one({
+        "$or": [
+            {"blocker_parent_id": user["user_id"], "blocked_parent_id": payload.invitee_parent_id},
+            {"blocker_parent_id": payload.invitee_parent_id, "blocked_parent_id": user["user_id"]},
+        ],
+    }, {"_id": 0})
+    if blocked:
+        raise HTTPException(status_code=403, detail="You can't propose a playdate with this family.")
     # 3.4: if a slot_id was given, it must still exist and belong to the invitee — the
     # feed the client rendered from could be stale (slot deleted between render and
     # submit). Reject cleanly instead of silently creating an orphaned playdate.
@@ -1880,6 +1993,15 @@ async def create_playdate(payload: PlaydateCreate, user: Dict[str, Any] = Depend
     invitee_child_ids = slot.get("child_ids") or [] if slot else []
     await db.playdate_participants.insert_one({"participant_id": new_id("part"), "playdate_id": playdate_id, "parent_id": payload.invitee_parent_id, "child_ids": invitee_child_ids, "rsvp_status": "invited", "responded_at": None, "shared_contact": None})
     await notify_parent(payload.invitee_parent_id, "Playdate proposal received", f"{user['name']} proposed {payload.activity} on {date_label(payload.date)} from {time_label(payload.start_time)}–{time_label(payload.end_time)}.", "playdate", playdate_id)
+    await log_event("proposal_sent", user["user_id"], {"playdate_id": playdate_id, "invitee_parent_id": payload.invitee_parent_id, "slot_id": payload.slot_id})
+    # P0-4: best available proxy for "propose-from-match" vs. a Who's Free feed
+    # slot-based propose — a match-based proposal never carries a slot_id (see
+    # ProposalModal's selected construction on the frontend), so absence of one here
+    # is the closest signal without adding new instrumentation. Imprecise in one way
+    # worth flagging: this fires when the proposal is actually SENT, not the moment
+    # "Propose" was clicked on the match card itself.
+    if not payload.slot_id:
+        await log_event("match_accepted", user["user_id"], {"playdate_id": playdate_id})
     # 3.5: cross-child double-booking — warn, don't block (see find_overlapping_other_child_playdate).
     overlap = await find_overlapping_other_child_playdate(user["user_id"], payload.child_ids, payload.date, payload.start_time, payload.end_time, exclude_playdate_id=playdate_id)
     warning = f"Heads up — you already have a playdate around this time on {date_label(payload.date)} for another child." if overlap else None
@@ -1934,6 +2056,7 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
             if accepted >= 2:
                 await db.playdates.update_one({"playdate_id": playdate_id}, {"$set": {"status": "confirmed"}})
                 await notify_parent(playdate["organizer_id"], "Playdate confirmed!", f"{user['name']} accepted. {playdate['activity']} is confirmed.", "playdate", playdate_id)
+        await log_event("proposal_accepted", user["user_id"], {"playdate_id": playdate_id})
         # 3.5: cross-child double-booking — warn, don't block (see
         # find_overlapping_other_child_playdate). Reliable on both sides now that
         # create_playdate captures the invitee's child_ids from the slot at creation.
@@ -1962,6 +2085,11 @@ async def respond_playdate(playdate_id: str, payload: PlaydateResponseAction, us
             others = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
             for other in others:
                 await notify_parent(other["parent_id"], "Playdate declined", f"{user['name']} can't make this one.", "playdate", playdate_id)
+            # P0-4: only the genuinely-terminal decline (a first-time proposal/counter
+            # never confirmed) logs as proposal_declined — the reschedule_pending
+            # branch above is declining a RESCHEDULE REQUEST, not a proposal, and
+            # reverts rather than terminates, so it's not really the same event.
+            await log_event("proposal_declined", user["user_id"], {"playdate_id": playdate_id})
     elif payload.action == "withdraw":
         if user["user_id"] != playdate["organizer_id"]:
             raise HTTPException(status_code=403, detail="Only the sender can withdraw a proposal")
@@ -2012,6 +2140,7 @@ async def cancel_playdate(playdate_id: str, payload: CancelRequest, user: Dict[s
     participants = await db.playdate_participants.find({"playdate_id": playdate_id, "parent_id": {"$ne": user["user_id"]}}, {"_id": 0}).to_list(20)
     for participant in participants:
         await notify_parent(participant["parent_id"], "Playdate cancelled", f"{user['name']} cancelled: {payload.reason}.", "playdate", playdate_id)
+    await log_event("playdate_cancelled", user["user_id"], {"playdate_id": playdate_id, "reason": payload.reason})
     return {"ok": True}
 
 
