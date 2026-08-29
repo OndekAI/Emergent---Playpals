@@ -1467,6 +1467,112 @@ async def admin_remove_community_member(payload: CommunityMemberRemoveRequest, a
     return {"status": "removed", "community_id": payload.community_id, "parent_id": parent["user_id"]}
 
 
+# TEMPORARY — follow-up cleanup for the demo-family deletion (commit 0925675).
+# That deletion only removed the sample_* identity/membership/availability rows;
+# it never checked whether a real family's own record (a playdate, a dismissal,
+# a share request...) references one of those now-deleted parent_ids. This finds
+# every such reference across the collections that could plausibly hold one,
+# deletes the ones that are sample-only on both sides (safe — no real family's
+# data), and leaves + reports anything with a real counterpart untouched, since
+# deleting those would erase a real family's own history, not just the demo
+# reference. Remove this endpoint once the follow-up is resolved.
+async def sample_id_pair_is_real(a: Optional[str], b: Optional[str]) -> Set[str]:
+    parties = {p for p in (a, b) if p}
+    return parties - set(SAMPLE_PARENT_IDS)
+
+
+@api_router.post("/admin/sample-accounts-cleanup")
+async def sample_accounts_cleanup(admin: Dict[str, Any] = Depends(require_admin)):
+    ids = SAMPLE_PARENT_IDS
+    report: Dict[str, Any] = {"deleted": {}, "flagged": []}
+
+    # playdates + playdate_participants: classify per playdate_id, using the full
+    # participant list (organizer and invitee both always get a participant row —
+    # confirmed in create_playdate), not just the sample-referencing rows.
+    sample_participant_rows = await db.playdate_participants.find({"parent_id": {"$in": ids}}, {"_id": 0}).to_list(1000)
+    candidate_ids = list({row["playdate_id"] for row in sample_participant_rows})
+    organizer_only = await db.playdates.find({"organizer_id": {"$in": ids}, "playdate_id": {"$nin": candidate_ids}}, {"_id": 0}).to_list(500)
+    candidate_ids += [p["playdate_id"] for p in organizer_only]
+    playdates_deleted, playdates_flagged = [], []
+    if candidate_ids:
+        all_participants = await db.playdate_participants.find({"playdate_id": {"$in": candidate_ids}}, {"_id": 0}).to_list(5000)
+        by_playdate: Dict[str, List[Dict[str, Any]]] = {}
+        for p in all_participants:
+            by_playdate.setdefault(p["playdate_id"], []).append(p)
+        playdate_docs = {p["playdate_id"]: p for p in await db.playdates.find({"playdate_id": {"$in": candidate_ids}}, {"_id": 0}).to_list(1000)}
+        for pid in candidate_ids:
+            parts = by_playdate.get(pid, [])
+            real_parties = {p["parent_id"] for p in parts} - set(ids)
+            pd = playdate_docs.get(pid, {})
+            if real_parties or not parts:
+                playdates_flagged.append({
+                    "type": "playdate", "playdate_id": pid, "status": pd.get("status"), "date": pd.get("date"),
+                    "organizer_id": pd.get("organizer_id"),
+                    "participants": [{"parent_id": p["parent_id"], "is_sample": p["parent_id"] in ids} for p in parts],
+                    "note": "no participant rows found" if not parts else None,
+                })
+            else:
+                playdates_deleted.append(pid)
+        if playdates_deleted:
+            await db.playdates.delete_many({"playdate_id": {"$in": playdates_deleted}})
+            await db.playdate_participants.delete_many({"playdate_id": {"$in": playdates_deleted}})
+    report["deleted"]["playdates"] = len(playdates_deleted)
+    report["flagged"] += playdates_flagged
+
+    # Pairwise-relationship collections: sample-only on both sides -> delete;
+    # a real party on either side -> leave alone and report.
+    for collection_name, id_field, field_a, field_b in [
+        ("match_dismissals", "dismissal_id", "dismisser_parent_id", "target_parent_id"),
+        ("parent_blocks", "block_id", "blocker_parent_id", "blocked_parent_id"),
+        ("availability_share_requests", "request_id", "requester_parent_id", "target_parent_id"),
+    ]:
+        collection = db[collection_name]
+        docs = await collection.find({"$or": [{field_a: {"$in": ids}}, {field_b: {"$in": ids}}]}, {"_id": 0}).to_list(1000)
+        delete_ids, flagged = [], []
+        for doc in docs:
+            real_parties = await sample_id_pair_is_real(doc.get(field_a), doc.get(field_b))
+            if real_parties:
+                flagged.append({"type": collection_name, **doc})
+            else:
+                delete_ids.append(doc[id_field])
+        if delete_ids:
+            await collection.delete_many({id_field: {"$in": delete_ids}})
+        report["deleted"][collection_name] = len(delete_ids)
+        report["flagged"] += flagged
+
+    # notifications: parent_id is the recipient only — the schema has no second
+    # parent-id field (reference_id points at a request/playdate id, not a
+    # parent), so a notification addressed to a now-deleted sample account can't
+    # structurally hold a real family's own data. Always safe to delete.
+    notif_result = await db.notifications.delete_many({"parent_id": {"$in": ids}})
+    report["deleted"]["notifications"] = notif_result.deleted_count
+
+    # credits: parent_id is the ledger owner; reference_id sometimes holds the
+    # other party's parent_id for social actions (e.g. availability_share).
+    # Owner is sample -> it's the demo account's own ledger row, safe to delete.
+    # Owner is real but reference_id is a sample id -> a real family's own credit
+    # entry that mentions a demo account -> leave it, report it.
+    credit_result = await db.credits.delete_many({"parent_id": {"$in": ids}})
+    report["deleted"]["credits"] = credit_result.deleted_count
+    credits_flagged = await db.credits.find({"parent_id": {"$nin": ids}, "reference_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+    report["flagged"] += [{"type": "credits", **c} for c in credits_flagged]
+
+    # events: parent_id is the actor; a few event types carry the counterparty's
+    # parent_id in metadata (target_parent_id / other_parent_id / invitee_parent_id).
+    # Actor is sample -> delete (the seed never calls log_event, so this should be
+    # empty in practice). Actor is real but metadata references a sample id ->
+    # a real family's own event log entry -> leave it, report it.
+    event_result = await db.events.delete_many({"parent_id": {"$in": ids}})
+    report["deleted"]["events"] = event_result.deleted_count
+    events_flagged = await db.events.find({
+        "parent_id": {"$nin": ids},
+        "$or": [{f"metadata.{key}": {"$in": ids}} for key in ["target_parent_id", "other_parent_id", "invitee_parent_id"]],
+    }, {"_id": 0}).to_list(500)
+    report["flagged"] += [{"type": "events", **e} for e in events_flagged]
+
+    return report
+
+
 async def ensure_master_membership(community: Dict[str, Any], parent_id: str) -> None:
     # Silent bookkeeping only: a grade member should also hold an active
     # membership in the grade's master (school) community, even though there's
