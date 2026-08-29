@@ -234,7 +234,7 @@ class CommunityMemberRemoveRequest(BaseModel):
     parent_email: str
 
 
-INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
+INTERESTS = ["Sports", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"]
 GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"]
 CHILD_STATUSES = ["active", "graduate", "alumni", "on_a_break", "moved_on"]
 
@@ -805,7 +805,7 @@ async def ensure_global_seed() -> None:
         )
 
     sample_families = [
-        ("sample_sarah", "Sarah Chen", "sarah.sample@playpals.local", "Riaan", 6, "Grade 1", ["Soccer", "Lego"]),
+        ("sample_sarah", "Sarah Chen", "sarah.sample@playpals.local", "Riaan", 6, "Grade 1", ["Sports", "Lego"]),
         ("sample_michelle", "Michelle Patel", "michelle.sample@playpals.local", "Emma", 8, "Grade 3", ["Art", "Animals"]),
         ("sample_david", "David Morgan", "david.sample@playpals.local", "Jake", 5, "Kindergarten", ["Nature", "Science"]),
         ("sample_priya", "Priya Shah", "priya.sample@playpals.local", "Anika", 7, "Grade 2", ["Dance", "Reading"]),
@@ -1660,6 +1660,16 @@ async def dismiss_match(payload: MatchDismissalCreate, user: Dict[str, Any] = De
     return doc
 
 
+@api_router.delete("/matches/dismiss/{dismissal_id}")
+async def undo_match_dismissal(dismissal_id: str, user: Dict[str, Any] = Depends(current_user)):
+    # Scoped to dismisser_parent_id so a parent can only undo their own dismissal —
+    # matches remove_availability's ownership-scoped delete pattern.
+    result = await db.match_dismissals.delete_one({"dismissal_id": dismissal_id, "dismisser_parent_id": user["user_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Dismissal not found")
+    return {"ok": True}
+
+
 @api_router.post("/parent-blocks")
 async def create_parent_block(payload: ParentBlockCreate, user: Dict[str, Any] = Depends(current_user)):
     if payload.target_parent_id == user["user_id"]:
@@ -2389,6 +2399,18 @@ async def startup_seed():
         "dedupe_key",
         unique=True,
         partialFilterExpression={"status": "proposed", "dedupe_key": {"$exists": True}},
+    )
+
+    # One-time data fixup for the Soccer -> Sports interest tag broadening: the
+    # global seed (ensure_global_seed, not currently called) ran in production for
+    # months before being disabled, inserting a "sample_sarah" demo family with
+    # interests: ["Soccer", "Lego"] via $setOnInsert — that record is real, already
+    # in the DB, and stays there untouched by seeding being off. This is a no-op on
+    # every subsequent startup once no documents match.
+    await db.children.update_many(
+        {"interests": "Soccer"},
+        {"$set": {"interests.$[elem]": "Sports"}},
+        array_filters=[{"elem": "Soccer"}],
     )
 
 @app.on_event("shutdown")

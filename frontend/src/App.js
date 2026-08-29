@@ -89,7 +89,7 @@ const blocksToChips = (blocks) => {
 };
 
 const GRADES = ["Pre-K", "Kindergarten", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5", "Grade 6", "Grade 7"];
-const INTERESTS = ["Soccer", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"];
+const INTERESTS = ["Sports", "Lego", "Art", "Reading", "Dance", "Swimming", "Gaming", "Nature", "Science", "Music", "Cooking", "Animals"];
 const ACTIVITIES = ["Park", "Our place", "Their place", "Swimming", "Soft play", "Free play"];
 const CHILD_COLORS = ["var(--terracotta)", "var(--blue)", "var(--sage)", "var(--amber)"];
 const childColor = (index) => CHILD_COLORS[index % CHILD_COLORS.length];
@@ -388,8 +388,26 @@ function HomePage({ user, dashboard, refresh }) {
   const dismissMatch = async (match, dismissalType) => {
     setLocalMatches((prev) => prev.filter((item) => item.match_id !== match.match_id));
     try {
-      await api("/matches/dismiss", { method: "POST", body: JSON.stringify({ target_parent_id: match.parent.user_id, dismissal_type: dismissalType }) });
-      toast.success(dismissalType === "not_this_week" ? "Hidden for this week" : "We won't suggest this pairing again");
+      const doc = await api("/matches/dismiss", { method: "POST", body: JSON.stringify({ target_parent_id: match.parent.user_id, dismissal_type: dismissalType }) });
+      if (dismissalType === "dont_suggest_again") {
+        // Undo just deletes the dismissal record server-side and refreshes the
+        // dashboard — no need to re-insert the match into localMatches by hand,
+        // the existing dashboard.matches sync effect picks it back up.
+        toast("We won't suggest this pairing again", {
+          action: {
+            label: "Undo",
+            onClick: async () => {
+              try {
+                await api(`/matches/dismiss/${doc.dismissal_id}`, { method: "DELETE" });
+                await refresh();
+                toast.success("Undone");
+              } catch (error) { toast.error(error.message); }
+            },
+          },
+        });
+      } else {
+        toast.success("Hidden for this week");
+      }
     } catch (error) { toast.error(error.message); }
   };
 
