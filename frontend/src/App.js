@@ -35,6 +35,7 @@ import AddFamily from "./AddFamily";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 
 const fmtDate = (value, options = {}) => {
   const date = typeof value === "string" ? new Date(`${value}T12:00:00`) : value;
@@ -141,11 +142,9 @@ function AuthCallback({ refresh }) {
     if (processed.current) return;
     processed.current = true;
     const hash = new URLSearchParams(window.location.hash.replace("#", ""));
-    const sessionId = hash.get("session_id");
     const magicToken = hash.get("token");
     const run = async () => {
       try {
-        if (sessionId) await api("/auth/oauth/session", { method: "POST", body: JSON.stringify({ session_id: sessionId }) });
         if (magicToken) await api("/auth/magic/verify", { method: "POST", body: JSON.stringify({ token: magicToken }) });
         await refresh();
         const pendingSlug = localStorage.getItem("pendingJoinSlug");
@@ -166,17 +165,78 @@ function AuthCallback({ refresh }) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function LoginScreen() {
+function LoginScreen({ refresh }) {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [emailError, setEmailError] = useState("");
+  const [googleReady, setGoogleReady] = useState(false);
+  const navigate = useNavigate();
+
+  // Real Google sign-in via Google Identity Services — replaces the old
+  // auth.emergentagent.com redirect. Google renders its own button into a
+  // hidden container; our visible "Continue with Google" button just clicks it,
+  // so the on-screen design stays exactly as spec'd.
+  const handleGoogleCredential = useCallback(async (credentialResponse) => {
+    setBusy(true);
+    try {
+      await api("/auth/google", {
+        method: "POST",
+        body: JSON.stringify({ credential: credentialResponse.credential }),
+      });
+      await refresh();
+      const pendingSlug = localStorage.getItem("pendingJoinSlug");
+      const dest = pendingSlug ? `/join/${pendingSlug}` : "/home";
+      if (pendingSlug) localStorage.removeItem("pendingJoinSlug");
+      navigate(dest, { replace: true });
+    } catch (error) {
+      toast.error(error.message || "Google sign-in failed");
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, navigate]);
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return;
+    const initialize = () => {
+      if (!window.google?.accounts?.id) return;
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleCredential,
+      });
+      const container = document.getElementById("hidden-google-button");
+      if (container) {
+        window.google.accounts.id.renderButton(container, { type: "standard" });
+      }
+      setGoogleReady(true);
+    };
+    if (window.google?.accounts?.id) {
+      initialize();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = initialize;
+    document.body.appendChild(script);
+    return () => {
+      document.body.removeChild(script);
+    };
+  }, [handleGoogleCredential]);
 
   const googleLogin = () => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    const redirectUrl = window.location.origin + "/home";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    if (!GOOGLE_CLIENT_ID) {
+      toast.error("Google sign-in isn't set up yet — use the email link below for now.");
+      return;
+    }
+    const realButton = document.querySelector("#hidden-google-button div[role=button]");
+    if (realButton && googleReady) {
+      realButton.click();
+    } else {
+      toast.error("Google sign-in is still loading — try again in a second.");
+    }
   };
 
   const requestMagic = async (event) => {
@@ -218,7 +278,8 @@ function LoginScreen() {
         </div>
       </section>
       <form className="auth-card stack login-actions" onSubmit={requestMagic} data-testid="login-auth-card">
-        <button type="button" className="button primary" onClick={googleLogin} data-testid="google-login-button">
+        <div id="hidden-google-button" style={{ position: "absolute", opacity: 0, pointerEvents: "none", height: 0, overflow: "hidden" }} aria-hidden="true" />
+        <button type="button" className="button primary" onClick={googleLogin} disabled={busy} data-testid="google-login-button">
           <UserRound size={17} /> Continue with Google
         </button>
         <div className="or-divider" data-testid="magic-link-divider"><span>or</span></div>
@@ -2708,7 +2769,7 @@ function AppRouter() {
 
   return (
     <Routes>
-      <Route path="/login" element={authed ? <Navigate to="/home" replace /> : <LoginScreen />} />
+      <Route path="/login" element={authed ? <Navigate to="/home" replace /> : <LoginScreen refresh={refresh} />} />
       <Route path="/auth/magic" element={<AuthCallback refresh={refresh} />} />
       <Route path="/welcome" element={<Protected authed={authed} loading={loading}><WelcomeScreen user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
       <Route path="/home" element={<Protected authed={authed} loading={loading} needsWelcome={needsWelcome}><HomePage user={user} dashboard={dashboard} refresh={refresh} /></Protected>} />
