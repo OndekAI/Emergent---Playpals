@@ -205,10 +205,6 @@ function LoginScreen({ refresh }) {
         client_id: GOOGLE_CLIENT_ID,
         callback: handleGoogleCredential,
       });
-      const container = document.getElementById("hidden-google-button");
-      if (container) {
-        window.google.accounts.id.renderButton(container, { type: "standard" });
-      }
       setGoogleReady(true);
     };
     if (window.google?.accounts?.id) {
@@ -231,12 +227,19 @@ function LoginScreen({ refresh }) {
       toast.error("Google sign-in isn't set up yet — use the email link below for now.");
       return;
     }
-    const realButton = document.querySelector("#hidden-google-button div[role=button]");
-    if (realButton && googleReady) {
-      realButton.click();
-    } else {
+    if (!googleReady) {
       toast.error("Google sign-in is still loading — try again in a second.");
+      return;
     }
+    // google.accounts.id.prompt() is Google's supported trigger for a custom
+    // button: Google's own rendered button lives in a cross-origin iframe a
+    // host page can't click into (deliberately, to prevent clickjacking), so a
+    // custom-styled button has to open sign-in through this API instead.
+    window.google.accounts.id.prompt((notification) => {
+      if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+        toast.error("Google sign-in didn't open — your browser may be blocking it, or use the email link below.");
+      }
+    });
   };
 
   const requestMagic = async (event) => {
@@ -278,7 +281,6 @@ function LoginScreen({ refresh }) {
         </div>
       </section>
       <form className="auth-card stack login-actions" onSubmit={requestMagic} data-testid="login-auth-card">
-        <div id="hidden-google-button" style={{ position: "absolute", opacity: 0, pointerEvents: "none", height: 0, overflow: "hidden" }} aria-hidden="true" />
         <button type="button" className="button primary" onClick={googleLogin} disabled={busy} data-testid="google-login-button">
           <UserRound size={17} /> Continue with Google
         </button>
