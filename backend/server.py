@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_auth_requests
 
 
 ROOT_DIR = Path(__file__).parent
@@ -54,8 +56,8 @@ class MagicVerifyRequest(BaseModel):
     token: str
 
 
-class OAuthSessionRequest(BaseModel):
-    session_id: str
+class GoogleAuthRequest(BaseModel):
+    credential: str
 
 
 class ChildCreate(BaseModel):
@@ -889,24 +891,25 @@ async def verify_magic_link(payload: MagicVerifyRequest, response: Response):
     return {"user": await enrich_user(user)}
 
 
-@api_router.post("/auth/oauth/session")
-async def oauth_session(payload: OAuthSessionRequest, response: Response):
-    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    supabase_response = requests.get(
-        f"{supabase_url}/auth/v1/user",
-        headers={"Authorization": f"Bearer {payload.session_id}"},
-        timeout=12,
-    )
-    if supabase_response.status_code >= 400:
-        raise HTTPException(status_code=401, detail="Google session could not be verified")
-    data = supabase_response.json()
-    user_meta = data.get("user_metadata", {})
-    user = await upsert_user(
-        data["email"],
-        user_meta.get("full_name") or user_meta.get("name"),
-        user_meta.get("avatar_url") or user_meta.get("picture"),
-    )
-    await create_session(user["user_id"], response, payload.session_id)
+@api_router.post("/auth/google")
+async def google_auth(payload: GoogleAuthRequest, response: Response):
+    """Verifies a real Google sign-in (ID token from Google Identity Services)
+    and logs the parent in — no third-party auth proxy involved."""
+    client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    if not client_id:
+        raise HTTPException(status_code=500, detail="Google sign-in is not configured yet")
+    try:
+        claims = google_id_token.verify_oauth2_token(
+            payload.credential, google_auth_requests.Request(), client_id
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Google sign-in could not be verified")
+    if claims.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+        raise HTTPException(status_code=401, detail="Google sign-in could not be verified")
+    if not claims.get("email_verified", True):
+        raise HTTPException(status_code=401, detail="Google account email is not verified")
+    user = await upsert_user(claims["email"], claims.get("name"), claims.get("picture"))
+    await create_session(user["user_id"], response)
     return {"user": await enrich_user(user)}
 
 
